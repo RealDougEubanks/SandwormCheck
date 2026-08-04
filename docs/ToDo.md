@@ -7,12 +7,15 @@
   463 package names**, from the union of the Wiz IOC CSV and JFrog's published table, with
   a 25-pair random sample independently corroborated against the npm registry
   (all 25 published 2026-08-04 then unpublished).
-  **Aikido reports 868 package names** — roughly 1.9x ours — and publishes no export.
-  Their version count (1,381) is *lower* than ours (2,255), so the lists differ in shape
-  rather than one containing the other; there is plausibly a tail of a few hundred names
-  missing. Getting that list is the highest-value remaining action, followed by Socket's
-  real-time campaign page (HTTP 403 to scripted fetches; needs a browser session).
-  Both source lists were labelled "Ongoing" at collection, so a re-pull is warranted.
+  No public source found so far lists more. Aikido, the vendor claiming the widest
+  impact, reports **434 names across 1,381 versions** — fewer than ours in both
+  dimensions — and all 16 packages it names are covered, including the five
+  community-spread ones outside the keyv/cacheable namespaces (`@deliveroo/reevent`,
+  `@or-sdk/invitations`, `@picsart/ai-sdk`, `@qlik/embed-runtime`, `picasso.js`).
+  Remaining avenues: Socket's real-time campaign page (HTTP 403 to scripted fetches,
+  needs a browser session), and re-querying OSV.dev, which held no advisories for this
+  campaign at all when checked. Both source lists were labelled "Ongoing" at collection,
+  so a re-pull is warranted regardless.
 - **No npm cache tarball inspection.** A malicious tarball sitting in `~/.npm/_cacache`
   is not detected unless it has been extracted. Worth adding as a `SUSPECT` check.
 - **The Windows port has only been exercised via PowerShell 7 on macOS.** The logic is

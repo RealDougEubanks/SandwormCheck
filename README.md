@@ -79,10 +79,13 @@ It reads the filesystem. It cannot see what your registry saw, and it cannot tel
 whether stolen credentials have been used. Pair it with a registry audit — see
 [docs/references.md](docs/references.md#cross-checks-worth-running-alongside-this-scanner).
 
-The package list is a point-in-time snapshot. Aikido reported 868 package names against
-the 463 encoded here, so a tail of names is still missing, and the campaign was
-republishing while the lists were collected. **A clean result is not proof of safety** —
-it means none of the encoded indicators were found.
+The package list is a point-in-time snapshot taken while the campaign was still
+republishing. No public source found so far enumerates more than the 463 names / 2,255
+versions encoded here — Aikido, the vendor claiming the widest impact, reports 434 names
+across 1,381 versions, and every package it names is covered. That is a good sign, not a
+completeness proof: the worm was active when the lists were collected, and no vendor
+publishes a live feed. **A clean result is not proof of safety** — it means none of the
+encoded indicators were found.
 
 ## Performance
 

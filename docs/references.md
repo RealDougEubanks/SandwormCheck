@@ -41,10 +41,17 @@ unpublished, which is the expected takedown signature.
 Do **not** merge `shai-hulud-2-packages.csv` from the same Wiz repository — that is the
 November 2025 campaign.
 
-Known gap: **Aikido** (<https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack>)
-reports 868 package names and 1,381 versions. Their name count exceeds ours while their
-version count is lower, so the two lists differ in shape; they publish no export. See
-`docs/ToDo.md`.
+Cross-checked against **Aikido**
+(<https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack>),
+the vendor claiming the widest impact: "At least 434 packages (across 1381 versions) have
+been compromised by the worm". That is fewer than the 463 names / 2,255 versions encoded
+here, and all 16 packages the post names are covered — including `ecto` and the five
+community-spread packages outside the keyv/cacheable namespaces (`@deliveroo/reevent`,
+`@or-sdk/invitations`, `@picsart/ai-sdk`, `@qlik/embed-runtime`, `picasso.js`). Aikido
+publishes no downloadable export; the post enumerates only those 16 as examples.
+
+Still outstanding: Socket's real-time campaign page returns HTTP 403 to scripted fetches
+and needs a browser session.
 
 At the time of collection **OSV.dev held no advisories for this campaign at all** — no
 GHSA, no `MAL-`, no CVE. Worth re-querying, since an OSV feed would be the cleanest

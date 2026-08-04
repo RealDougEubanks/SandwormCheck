@@ -24,6 +24,32 @@ Source material for the indicators in `signatures/shai-hulud-2026-08.conf`.
   vector, `loginctl enable-linger` on Linux, the 24-hour TTL self-destruct, and the
   Microsoft Defender detection name `Trojan:npm/MalBun.A`.
 
+## Package list sources
+
+The `PKGVER` records in `signatures/shai-hulud-2026-08-packages.conf` come from the union
+of two machine-readable feeds, which each covered the other's gap:
+
+- **Wiz IOC CSV** — <https://github.com/wiz-sec-public/wiz-research-iocs/blob/main/reports/keyv-packages.csv>
+  2,235 pairs across 443 package names. Omits the entire `@keyv/*` scope.
+- **JFrog** — <https://research.jfrog.com/post/shai-hulud-is-back-august/>
+  1,738 pairs across 463 names. The only source carrying all 19 `@keyv/*` packages.
+
+Union: **2,255 pairs across 463 package names.** A 25-pair random sample was checked
+against the npm registry directly; all 25 were published 2026-08-04 and subsequently
+unpublished, which is the expected takedown signature.
+
+Do **not** merge `shai-hulud-2-packages.csv` from the same Wiz repository — that is the
+November 2025 campaign.
+
+Known gap: **Aikido** (<https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack>)
+reports 868 package names and 1,381 versions. Their name count exceeds ours while their
+version count is lower, so the two lists differ in shape; they publish no export. See
+`docs/ToDo.md`.
+
+At the time of collection **OSV.dev held no advisories for this campaign at all** — no
+GHSA, no `MAL-`, no CVE. Worth re-querying, since an OSV feed would be the cleanest
+long-term source.
+
 ## Discrepancies noted while encoding
 
 - Wiz labels three 40-hex-character values as SHA256. They are 40 chars, so they are

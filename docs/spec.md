@@ -108,15 +108,77 @@ CHECK_TYPE|SEVERITY|ID|PATTERN|DESCRIPTION
 | `PATHGLOB` | Glob matched against the full discovered path | Filenames too common to match on basename alone |
 | `SHA256` | 64 hex chars, compared against candidate files | Highest confidence |
 | `SHA1` | 40 hex chars | Some vendors published SHA-1 only |
-| `PKGVER` | `name@version`, exact match against `package.json` | Vulnerable-version detection |
+| `PKGVER` | `name@version`, exact match against `package.json` **and lockfiles** | Vulnerable-version detection |
 | `CONTENT` | Literal substring, searched in bounded candidate files | Strings, domains, markers |
 
 Rejected as out of scope for v1: regex content matching (portability of regex dialects
 between `grep` and .NET is a correctness trap), and version *ranges* for `PKGVER`
 (semver comparison in POSIX `sh` is not worth the bug surface — the campaign publishes
-discrete bad versions, so enumerate them).
+discrete bad versions, so enumerate them). Note this means a lockfile *range spec*
+such as `"keyv": "^6.0.0"` is not matched; only the resolved version is.
 
-### 4.2 Severity
+### 4.2 Lockfile coverage
+
+`PKGVER` matches two independent sources:
+
+1. **Installed manifests** — the first `name` and `version` in each
+   `package.json`. Reported as `installed <name@version>`.
+2. **Lockfile pins** — `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`,
+   `pnpm-lock.yaml`, `bun.lock`, and `bun.lockb`. Reported as
+   `pinned <name@version> in <lockfile>`.
+
+Lockfiles matter because a project can pin a compromised version without it ever
+being installed on the scanned host — a fresh `npm install` would then reintroduce
+it. Deliberately **not** a separate `LOCKFILE` check type: that would require two
+signature records per package version, doubling a file that already holds a few
+thousand records and creating a second place for the two to drift apart.
+
+Matching **parses the lockfile structurally** rather than substring-searching it.
+For each line the scanner recovers candidate `(name, version)` pairs and looks
+each one up in a hash table built from the `PKGVER` records:
+
+1. **Resolved registry tarball URL** — `.../<name>/-/<basename>-<version>.tgz`,
+   covering `package-lock.json` v1/v2/v3, `npm-shrinkwrap.json`, `yarn.lock` v1,
+   and `bun.lockb`. The scope is recovered by checking whether the path segment
+   before the name begins with `@`.
+2. **Quoted tokens** — yarn berry `resolution: "name@npm:version"`, `bun.lock`
+   entries, and quoted pnpm mapping keys. Split at the *last* `@` so scoped names
+   survive.
+3. **Bare pnpm mapping keys** — `name@version:` (v6/v9) and `/name/version:`
+   (v5). The latter splits at the last `/`.
+
+Two properties follow from parsing rather than pattern matching:
+
+- **Cost is independent of signature count.** One pass per lockfile. The earlier
+  design generated a literal pattern per signature per format — about 16,000
+  patterns for this campaign — and ran `grep -Ff` over each lockfile. That
+  measured 30–60 seconds on a single 175 KB pnpm lockfile, because BSD `grep`
+  degrades sharply with a large `-f` pattern file. Structural parsing brought the
+  same stage from 90s to under 1s on a real repository.
+- **No basename false positive is possible.** Name and version are recovered as
+  fields, so an unscoped signature such as `utils@2.5.1` cannot match
+  `@cacheable/utils@2.5.1`. The pattern-based design needed a secondary confirm
+  regex to suppress exactly this; parsing removes the class of bug rather than
+  patching it. A regression fixture covers it.
+
+**Nested lockfiles.** A lockfile inside `node_modules/` is a dependency's own dev
+lockfile. npm, yarn, and pnpm all ignore those when resolving, so reporting one
+would be a misleading claim about the scanned project — they are skipped.
+`npm-shrinkwrap.json` is the deliberate exception: npm honors a shipped
+shrinkwrap, so a nested one does affect what gets installed and is still read.
+
+`bun.lockb` is binary but not opaque — it stores registry URLs as contiguous
+ASCII. NUL bytes are translated to newlines before parsing (and it is read as
+Latin-1, never UTF-8, which mangles the surrounding bytes). A *hit* there is as
+reliable as in a text lockfile; a *miss* is less conclusive, because its
+non-registry entries are not recoverable this way.
+
+Not detected, all failing closed as false negatives rather than false positives:
+git, `file:`, `link:`, and `workspace:` dependencies; yarn berry `patch:`
+resolutions, which are percent-encoded; pnpm and bun alias forms; and npm entries
+that carry no `resolved` field.
+
+### 4.3 Severity
 
 - `CONFIRMED` — the artifact has no benign explanation. Payload files, matching
   hashes, host persistence units, exfil markers.
@@ -226,7 +288,29 @@ a scan that could not read `/Users/alice` must say so rather than imply alice is
 - Fixture payload files contain inert text, never real malware. Hash-match fixtures
   use a file whose hash is added to a test-only signature file.
 
-## 11. Compatibility
+## 11. Performance with large signature sets
+
+The shipped signature set holds a few thousand `PKGVER` records. Three separate
+scaling traps showed up while measuring against a real developer machine
+(414,000 files, 14 GB across ~4,000 installed packages), each of which made a
+fleet scan unusable:
+
+| Stage | Naive form | Cost | Fix |
+|---|---|---|---|
+| Signature parsing | ~15 processes per record | 51s before reading a file | single `awk` pass |
+| `PKGVER` matching | rescan every signature per manifest | O(sigs x files) | `name@version` hash lookup |
+| Lockfile matching | ~16,000 `grep -F` patterns per file | 30-60s per lockfile | structural parse, O(file) |
+| Hashing | hash every candidate | reads all 14 GB | narrow to signature basenames |
+| Content matching | one `grep` per pattern per file | ~10 processes per file | batched `grep -Ff` via `xargs` |
+
+The governing rule for any future check: **cost must scale with the number of
+files scanned, not with signatures times files.** A scanner nobody runs because
+it takes an hour detects nothing.
+
+`--verbose` prints elapsed seconds against each stage so a regression here is
+visible in the output rather than needing a profiler.
+
+## 12. Compatibility
 
 - `sandwormcheck.sh`: POSIX `sh`. Tested against `bash` 3.2 (macOS system shell),
   `dash`, and `zsh`. No bashisms, no `mapfile`, no `[[`, no arrays.

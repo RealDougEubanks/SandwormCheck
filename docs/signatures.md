@@ -101,6 +101,24 @@ Exact match only. There is deliberately no version-range support: semver compari
 POSIX `sh` is a bug farm, and campaigns publish discrete bad versions, so enumerate them.
 Scoped packages work as written (`@scope/name@1.2.3`).
 
+A single `PKGVER` record covers **both** an installed package and a lockfile pin — you
+do not write two records. The finding's `detail` field tells them apart:
+
+- `installed keyv@6.0.0` — found in an installed `package.json`
+- `pinned keyv@6.0.0 in package-lock.json` — pinned but possibly never installed
+
+Lockfile formats covered: `package-lock.json` (v1/v2/v3), `npm-shrinkwrap.json`,
+`yarn.lock` (v1 and berry), `pnpm-lock.yaml` (v5/v6/v9), `bun.lock`, and `bun.lockb`.
+Range specs are not matched — only resolved versions — so `"keyv": "^6.0.0"` in a
+`dependencies` block does not fire, but the resolved `6.0.0` entry does.
+
+Lockfiles nested inside `node_modules/` are skipped (a dependency's own dev lockfile
+does not affect resolution), except `npm-shrinkwrap.json`, which npm honors. See
+`docs/spec.md` section 4.2 for the parsing strategy and its known gaps.
+
+Note that adding a hash record also needs a `FILENAME` record for that basename, since
+hash checks are narrowed by basename for performance. The scanner warns if you forget.
+
 ### `CONTENT` — a literal substring in a candidate file
 
 For embedded strings, C2 domains, and markers.

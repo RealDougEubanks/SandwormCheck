@@ -43,7 +43,8 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1 -Severity Error,Warning
+          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1 `
+            -Settings ./PSScriptAnalyzerSettings.psd1 -Severity Error,Warning
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
 

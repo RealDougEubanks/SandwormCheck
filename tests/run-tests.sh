@@ -107,10 +107,12 @@ test_check_types() {
 	expect_out "SH25-R002" "PATHGLOB detects .vscode/setup.mjs"
 	expect_out "SH25-M001" "CONTENT detects the Shai-Hulud exfil marker"
 	expect_out "SH25-N001" "CONTENT detects the npm-cache.com C2 domain"
-	expect_out "SH25-V001" "PKGVER detects keyv@6.0.0"
+	# Assert on the name@version in the detail text, not the signature ID: IDs in
+	# the generated package file are hash-derived and would churn on regeneration.
+	expect_out "installed keyv@6.0.0" "PKGVER detects keyv@6.0.0"
 
 	run 10 "scan suspect tree" --path "$FIX/suspect" --signatures "$SIGS" --no-color
-	expect_out "SH25-V012" "PKGVER detects flat-cache@6.1.24"
+	expect_out "installed flat-cache@6.1.24" "PKGVER detects flat-cache@6.1.24"
 
 	# Hash checks use a generated signature file so no real malware is needed.
 	_hashfix="$TMP/hashfix/proj/node_modules/pkg"
@@ -119,15 +121,30 @@ test_check_types() {
 	_s256=$(hash_of 256 "$_hashfix/Math_Symbol.js")
 	_s1=$(hash_of 1 "$_hashfix/Math_Symbol.js")
 	if [ -n "$_s256" ] && [ -n "$_s1" ]; then
+		# A FILENAME record is what brings the file into the hash candidate set.
+		# Hashing is narrowed by basename because hashing a whole dependency tree
+		# reads gigabytes per host; see docs/spec.md section 6.
 		cat >"$TMP/hash.conf" <<EOF
 #!campaign  hash self-test
 #!version   test
+FILENAME|SUSPECT|TEST-F001|Math_Symbol.js|Inert filename fixture
 SHA256|CONFIRMED|TEST-H001|$_s256|Inert SHA-256 fixture
 SHA1|CONFIRMED|TEST-H002|$_s1|Inert SHA-1 fixture
 EOF
 		run 20 "SHA256/SHA1 match exits 20" --path "$TMP/hashfix" --signatures "$TMP/hash.conf" --no-color
 		expect_out "TEST-H001" "SHA256 check matches a known digest"
 		expect_out "TEST-H002" "SHA1 check matches a known digest"
+
+		# The coverage gap must be reported, not pass silently: hash records whose
+		# basename nothing names would otherwise find nothing and look clean.
+		cat >"$TMP/hash-nofn.conf" <<EOF
+#!campaign  hash gap self-test
+SHA256|CONFIRMED|TEST-H003|$_s256|Hash with no FILENAME record
+EOF
+		run 0 "hash record with no covering FILENAME finds nothing" \
+			--path "$TMP/hashfix" --signatures "$TMP/hash-nofn.conf" --no-color
+		expect_err "hash signatures are loaded but no file matched" \
+			"missing hash coverage is warned about, not silent"
 	else
 		printf '  skip hash checks (no hashing tool available)\n'
 	fi
@@ -150,7 +167,7 @@ test_true_negatives() {
 	section "check types: true negatives [$CURRENT_SHELL]"
 
 	run 0 "clean tree" --path "$FIX/clean" --signatures "$SIGS" --no-color
-	refute_out "SH25-V001" "keyv@5.5.1 does not match the keyv@6.0.0 signature"
+	refute_out "installed keyv@6.0.0" "keyv@5.5.1 does not match the keyv@6.0.0 signature"
 	refute_out "SH25-F001" "no payload filename reported in a clean tree"
 	refute_out "SH25-R001" "a legitimate .vscode/tasks.json is not flagged"
 	refute_out "SH25-N001" "no C2 domain reported in a clean tree"
@@ -158,10 +175,96 @@ test_true_negatives() {
 	# A legitimately-named setup.mjs outside .claude/.vscode must not be a
 	# CONFIRMED path-glob hit. This is the false-positive case that made
 	# PATHGLOB necessary in the first place.
+	# Regression from a real-world scan: a legitimate package that ships
+	# dist/.../setup.mjs, plus its source map and a package.json referencing the
+	# name, must stay clean. A bare CONTENT match on "setup.mjs" produced 28 false
+	# positives on one developer machine before it was removed.
+	run 0 "a package legitimately shipping setup.mjs is not flagged" \
+		--path "$FIX/legit-setup" --signatures "$SIGS" --no-color
+	refute_out "setup.mjs" "no finding mentions a legitimate setup.mjs"
+
 	mkdir -p "$TMP/fp/proj/scripts"
 	printf 'export default {};\n' >"$TMP/fp/proj/scripts/setup.mjs"
 	printf '{"name":"legit","version":"1.0.0"}\n' >"$TMP/fp/proj/package.json"
 	run 0 "legitimate scripts/setup.mjs is not flagged" --path "$TMP/fp" --signatures "$SIGS" --no-color
+}
+
+test_lockfiles() {
+	section "lockfile pins [$CURRENT_SHELL]"
+
+	LFX="$FIX/lockfile"
+
+	run 10 "npm lockfileVersion 3 pin exits 10" --path "$LFX/npm3" --signatures "$SIGS" --no-color
+	expect_out "pinned keyv@6.0.0 in package-lock.json" "npm v3: unscoped pin detected via resolved URL"
+	expect_out "pinned @keyv/redis@6.0.0 in package-lock.json" "npm v3: scoped pin detected via resolved URL"
+
+	run 10 "npm lockfileVersion 1 pin exits 10" --path "$LFX/npm1" --signatures "$SIGS" --no-color
+	expect_out "pinned flat-cache@6.1.24 in package-lock.json" "npm v1: pin detected"
+
+	run 10 "yarn.lock v1 pin exits 10" --path "$LFX/yarn1" --signatures "$SIGS" --no-color
+	expect_out "pinned cacheable@2.5.1 in yarn.lock" "yarn v1: unscoped pin detected"
+	expect_out "pinned @cacheable/utils@2.5.1 in yarn.lock" "yarn v1: scoped pin detected"
+
+	run 10 "pnpm-lock.yaml v9 pin exits 10" --path "$LFX/pnpm9" --signatures "$SIGS" --no-color
+	expect_out "pinned cache-manager@7.2.10 in pnpm-lock.yaml" "pnpm v9: unquoted key detected"
+	# pnpm quotes scoped keys, so the colon is not adjacent to the version.
+	expect_out "pinned @cacheable/memory@2.2.1 in pnpm-lock.yaml" "pnpm v9: quoted scoped key detected"
+
+	# A lockfile listing only safe versions must stay clean. This fixture also
+	# holds cacheable-request@2.5.1 and @cacheable/utils@9.9.9 as prefix and
+	# scope traps.
+	run 0 "lockfile with only safe versions exits 0" --path "$LFX/clean-lock" --signatures "$SIGS" --no-color
+	refute_out "pinned" "no pin reported for safe versions"
+	refute_out "cacheable@2.5.1" "cacheable-request@2.5.1 does not match cacheable@2.5.1"
+
+	# The false positive the confirm regex exists to prevent: a scoped package
+	# whose basename and version match an unscoped signature. Its resolved URL
+	# contains the unscoped signature's tarball path as a literal substring.
+	run 0 "scoped package sharing an unscoped basename exits 0" \
+		--path "$LFX/fp-basename" --signatures "$SIGS" --no-color
+	refute_out "pinned" "basename collision does not produce a false pin"
+
+	# Lockfile detection must not depend on the package being installed: these
+	# fixtures contain no node_modules at all.
+	if [ -d "$LFX/npm3/node_modules" ]; then
+		no "lockfile fixtures have no node_modules" "npm3 fixture unexpectedly has node_modules"
+	else
+		ok "lockfile fixtures detect pins with nothing installed"
+	fi
+
+	# A lockfile nested inside node_modules is a dependency's own dev lockfile.
+	# npm, yarn, and pnpm ignore those when resolving, so reporting one would be a
+	# misleading finding about the scanned project.
+	run 0 "nested node_modules/*/yarn.lock is ignored" \
+		--path "$LFX/nested" --signatures "$SIGS" --no-color
+	refute_out "pinned" "a dependency's own lockfile is not reported as a pin"
+
+	# npm-shrinkwrap.json is the exception: npm honors a shipped one, so a nested
+	# shrinkwrap does affect what gets installed and must still be read.
+	run 10 "nested npm-shrinkwrap.json is still read" \
+		--path "$LFX/shrinkwrap" --signatures "$SIGS" --no-color
+	expect_out "pinned cache-manager@7.2.10 in npm-shrinkwrap.json" \
+		"nested shrinkwrap pin is detected"
+
+	# An oversized lockfile is skipped rather than parsed. Padded past the 1024
+	# byte floor that --max-file-size accepts, since the committed fixture is
+	# smaller than that.
+	mkdir -p "$TMP/biglock/proj"
+	{
+		printf '{"lockfileVersion":3,"packages":{"node_modules/keyv":{"version":"6.0.0",'
+		printf '"resolved":"https://registry.npmjs.org/keyv/-/keyv-6.0.0.tgz","integrity":"sha512-'
+		i=0
+		while [ "$i" -lt 40 ]; do printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; i=$((i + 1)); done
+		printf '=="}}}\n'
+	} >"$TMP/biglock/proj/package-lock.json"
+
+	run 10 "oversized lockfile is detected when under the cap" \
+		--path "$TMP/biglock" --signatures "$SIGS" --max-file-size 8388608 --no-color
+	expect_out "pinned keyv@6.0.0" "padded lockfile still parses normally"
+
+	run 0 "lockfile above --max-file-size is skipped" \
+		--path "$TMP/biglock" --signatures "$SIGS" --max-file-size 1024 --no-color
+	refute_out "pinned" "oversized lockfile produces no pin"
 }
 
 test_signature_validation() {
@@ -442,10 +545,14 @@ test_robustness() {
 		_h=$(hash_of 256 "$TMP/big/proj/node_modules/pkg/Math_Symbol.js")
 		cat >"$TMP/big.conf" <<EOF
 #!campaign  size-bound test
+FILENAME|SUSPECT|SIZE-F01|Math_Symbol.js|Brings the file into the hash candidate set
 SHA256|CONFIRMED|SIZE-001|$_h|Oversized fixture
 EOF
-		run 0 "files above --max-file-size are excluded from hash checks" \
+		# Exit 10, not 0: the FILENAME record still matches at SUSPECT. What must
+		# not appear is the CONFIRMED hash finding.
+		run 10 "files above --max-file-size are excluded from hash checks" \
 			--path "$TMP/big" --signatures "$TMP/big.conf" --max-file-size 2048 --no-color
+		refute_out "SIZE-001" "oversized file produces no hash finding"
 		run 20 "the same file matches when the size cap allows it" \
 			--path "$TMP/big" --signatures "$TMP/big.conf" --max-file-size 1048576 --no-color
 	fi
@@ -527,6 +634,21 @@ test_powershell_parity() {
 	pscan 2 "ps1: -TimeoutSeconds below the floor exits 2" -Path "$FIX/clean" -SignaturePath "$SIGS" -TimeoutSeconds 5
 	pscan 2 "ps1: -MaxFileSize below the floor exits 2" -Path "$FIX/clean" -SignaturePath "$SIGS" -MaxFileSize 10
 
+	# Lockfile pins must agree exactly between the two engines, including the
+	# false-positive fixtures.
+	for tree in npm3 npm1 yarn1 pnpm9 clean-lock fp-basename nested shrinkwrap; do
+		sh "$SCANNER" --path "$FIX/lockfile/$tree" --signatures "$SIGS" --no-color >"$TMP/sh.out" 2>/dev/null || :
+		pwsh -NoProfile -File "$_ps" -Path "$FIX/lockfile/$tree" -SignaturePath "$SIGS" -NoColor >"$TMP/ps.out" 2>/dev/null || :
+		grep -oE 'pinned [^ ]+ in [^)]*' "$TMP/sh.out" 2>/dev/null | sort -u >"$TMP/sh.pins" || :
+		grep -oE 'pinned [^ ]+ in [^)]*' "$TMP/ps.out" 2>/dev/null | sort -u >"$TMP/ps.pins" || :
+		if cmp -s "$TMP/sh.pins" "$TMP/ps.pins"; then
+			ok "ps1: identical lockfile pins on the $tree fixture"
+		else
+			no "ps1: identical lockfile pins on the $tree fixture" \
+				"sh=[$(tr '\n' ' ' <"$TMP/sh.pins")] ps=[$(tr '\n' ' ' <"$TMP/ps.pins")]"
+		fi
+	done
+
 	# Secrets must never be echoed, same guarantee as the sh scanner.
 	if [ -d "$TMP/secret" ]; then
 		pscan 20 "ps1: scans the secret fixture" -Path "$TMP/secret" -SignaturePath "$SIGS" -NoColor
@@ -570,6 +692,7 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_exit_codes
 	test_check_types
 	test_true_negatives
+	test_lockfiles
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

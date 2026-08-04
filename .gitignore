@@ -8,3 +8,7 @@
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Research working notes. Durable provenance is recorded in docs/references.md
+# and the input list is committed as signatures/compromised-packages.txt.
+/.research/

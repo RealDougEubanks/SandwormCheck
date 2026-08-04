@@ -67,20 +67,29 @@ The worm's on-disk footprint, drawn from the Wiz, Socket, and CyberKendra write-
 - **Exfiltration markers** — the `Shai-Hulud: Here We Go Again` string and the embedded
   threat string unique to this payload.
 - **C2 and staging domains** — `npm-cache.com`, `pypi-get.com`, `js-mirror.com`.
-- **Compromised package versions** — `keyv@6.0.0`, `cacheable@2.5.1`,
-  `flat-cache@6.1.24`, `file-entry-cache@11.1.7`, and the rest of the known set.
+- **Compromised package versions** — 2,255 `name@version` pairs across 463 package
+  names, matched both against installed packages and against **lockfile pins**, so a
+  project that pins a bad version without having installed it is still caught. Covers
+  `package-lock.json` (v1/v2/v3), `npm-shrinkwrap.json`, `yarn.lock` (v1 and berry),
+  `pnpm-lock.yaml` (v5/v6/v9), `bun.lock`, and `bun.lockb`.
 
 ### What it does not do
 
-It reads the filesystem. It cannot see what your registry saw, so it will not catch a
-project that pinned a bad version but never installed it on a scanned host, and it
-cannot tell you whether stolen credentials have been used. Pair it with a lockfile sweep
-and a registry audit — see [docs/references.md](docs/references.md#cross-checks-worth-running-alongside-this-scanner).
+It reads the filesystem. It cannot see what your registry saw, and it cannot tell you
+whether stolen credentials have been used. Pair it with a registry audit — see
+[docs/references.md](docs/references.md#cross-checks-worth-running-alongside-this-scanner).
 
-Vendors reported 400+ affected packages and the campaign was republishing in real time.
-The package-version list here is a point-in-time snapshot and is certainly incomplete.
-**A clean result is not proof of safety** — it means none of the encoded indicators were
-found.
+The package list is a point-in-time snapshot. Aikido reported 868 package names against
+the 463 encoded here, so a tail of names is still missing, and the campaign was
+republishing while the lists were collected. **A clean result is not proof of safety** —
+it means none of the encoded indicators were found.
+
+## Performance
+
+Measured on a developer machine with 414,000 files and 14 GB across ~4,000 installed
+packages: **about 6.5 minutes**, inside the 900s default timeout. Small trees finish in
+seconds. Cost scales with files scanned, not with the number of signatures — see
+[docs/spec.md](docs/spec.md) §11. Run with `--verbose` to get elapsed seconds per stage.
 
 ## Usage
 
@@ -127,10 +136,13 @@ a worked example are in [docs/signatures.md](docs/signatures.md).
 SHELLS="sh bash dash zsh" ./tests/run-tests.sh    # every shell you care about
 ```
 
-The suite covers every check type (true positive and true negative), all five exit
-codes, signature and argument validation, secret non-disclosure, read-only behavior, and
-parity between the shell and PowerShell implementations. Test fixtures contain inert
-placeholder text — no live malware is in this repo.
+153 assertions covering every check type (true positive and true negative), all five exit
+codes, every lockfile format, signature and argument validation, secret non-disclosure,
+read-only behavior, and parity between the shell and PowerShell implementations. Several
+fixtures are regressions from false positives found by scanning a real machine — a
+legitimate package shipping `dist/.../setup.mjs`, a scoped package sharing an unscoped
+signature's basename, and a dependency's own nested `yarn.lock`. Test fixtures contain
+inert placeholder text — no live malware is in this repo.
 
 ## Documentation
 

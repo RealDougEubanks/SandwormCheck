@@ -190,14 +190,24 @@ silent gap.
 
 ## Performance
 
-A full default scan of a developer laptop takes roughly 30–90 seconds. Two things keep it
-bounded:
+Measured on a developer machine with 414,000 files and 14 GB across roughly 4,000
+installed packages, a full scan takes about **6.5 minutes**, well inside the 900s default
+timeout. Smaller trees finish in seconds. `--verbose` reports elapsed seconds per stage,
+so if a scan is slow you can see which stage owns the time — content matching is normally
+the largest share, since it is the only stage that reads every candidate file.
+
+Three things keep it bounded:
 
 1. Heavy directories are never descended into — caches, `.git/objects`, trash, cloud
    storage mounts, `/System`, `/proc`, and friends.
-2. Hash and content checks run only on *candidate* files: those whose name matches a
-   signature, or that sit inside `node_modules`, `.claude`, or `.vscode`. Hashing every
-   file on a disk is not viable; hashing the files this malware is known to write is.
+2. Content checks run on *candidate* files only: those whose name matches a signature, or
+   that sit inside `node_modules`, `.claude`, or `.vscode`. The broad sweep uses a single
+   batched `grep -l`, and only files that matched are re-read to identify which pattern
+   hit.
+3. Hash checks are narrower still — only files whose basename a signature actually names.
+   Hashing reads every byte, and hashing the full candidate set would mean reading the
+   whole 14 GB. If a signature set has hash records with no matching basename, the scanner
+   warns rather than silently checking nothing.
 
 If a scan is slow, run with `--verbose` to see which root is responsible, then narrow
 with `--path` or lower `--max-depth`.

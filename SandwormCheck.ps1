@@ -60,7 +60,7 @@ param(
 
     # Bounds are validated in Invoke-Main rather than with [ValidateRange], which
     # fails at parameter binding and would exit 1 instead of the documented
-    # usage code 2 — the sh and PowerShell scanners must agree on exit codes.
+    # usage code 2: the sh and PowerShell scanners must agree on exit codes.
     [int] $MaxDepth = 12,
 
     [long] $MaxFileSize = 8388608,
@@ -235,6 +235,11 @@ function Import-Signatures {
     if ($records.Count -eq 0) {
         Stop-WithError $EXIT_ERROR 'no valid signature records loaded'
     }
+    # A campaign split across several files (hand-maintained indicators in one,
+    # generated package versions in another) declares the same name in each.
+    $uniqueCampaigns = @($script:Campaigns | Select-Object -Unique)
+    $script:Campaigns = New-Object System.Collections.ArrayList
+    foreach ($c in $uniqueCampaigns) { [void] $script:Campaigns.Add($c) }
     Write-Diag "loaded $($records.Count) signature records"
     return $records
 }
@@ -532,6 +537,147 @@ function Invoke-PkgVerCheck {
 }
 
 # ---------------------------------------------------------------------------
+# Lockfile pins
+#
+# Invoke-PkgVerCheck only sees installed packages. A project that pins a
+# compromised version in its lockfile but has never had `npm install` run on
+# this host still needs remediation, and will reintroduce the bad version on the
+# next install.
+# ---------------------------------------------------------------------------
+
+# bun.lockb is binary but not opaque: it embeds registry tarball URLs as
+# contiguous ASCII, so the resolved-URL patterns work against a Latin-1 decode.
+# A miss in a .lockb is less conclusive than a miss in a text lockfile.
+$script:LockfileNames = @(
+    'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock',
+    'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'
+)
+
+function Get-PkgVerLookup {
+    param([object[]] $Signatures)
+    $want = @{}
+    foreach ($sig in ($Signatures | Where-Object { $_.Type -eq 'PKGVER' })) {
+        if (-not $want.ContainsKey($sig.Pattern)) { $want[$sig.Pattern] = $sig }
+    }
+    return $want
+}
+
+function Invoke-LockfileCheck {
+    param([object[]] $Signatures, [string[]] $AllFiles)
+
+    # Extract every (name, version) pair the lockfile actually declares, then look
+    # each one up in the PKGVER table. One pass per lockfile, independent of how
+    # many signatures are loaded.
+    #
+    # The earlier approach built a literal pattern per signature per format
+    # (~16,000 for this campaign) and substring-searched each lockfile, which
+    # measured 30-60s on a single 175 KB pnpm lockfile. Parsing structurally is
+    # both faster and more precise: name and version are recovered as fields, so
+    # an unscoped signature cannot match a scoped package sharing its basename.
+    $want = Get-PkgVerLookup -Signatures $Signatures
+    if ($want.Count -eq 0) { return }
+
+    foreach ($file in $AllFiles) {
+        $leaf = [IO.Path]::GetFileName($file)
+        if ($script:LockfileNames -notcontains $leaf) { continue }
+
+        # A lockfile nested inside node_modules is a dependency's own dev
+        # lockfile; npm, yarn, and pnpm all ignore those when resolving, so a hit
+        # there would mislead as well as waste work. npm-shrinkwrap.json is the
+        # exception: npm does honor a shipped one.
+        if ($file -match '(?i)[\\/]node_modules[\\/]' -and $leaf -ne 'npm-shrinkwrap.json') { continue }
+
+        try {
+            $info = Get-Item -LiteralPath $file -Force -ErrorAction Stop
+            if ($info.Length -gt $MaxFileSize) {
+                Write-Diag "lockfile skipped (over -MaxFileSize): $file"
+                continue
+            }
+            # Latin-1 so bun.lockb's embedded ASCII survives; a UTF-8 decode
+            # mangles the surrounding binary and can drop the URLs.
+            $text = [IO.File]::ReadAllText($file, [Text.Encoding]::GetEncoding(28591))
+        } catch {
+            Write-Diag "lockfile skipped for ${file}: $($_.Exception.Message)"
+            continue
+        }
+
+        $seen = New-Object System.Collections.Generic.HashSet[string]
+
+        $report = {
+            param($nv)
+            if (-not $want.ContainsKey($nv)) { return }
+            if (-not $seen.Add($nv)) { return }
+            $sig = $want[$nv]
+            Add-Finding $sig.Severity $sig.Id $file "pinned $nv in $leaf" $sig.Description
+        }
+
+        # "name@version" -> split at the LAST @ so scoped names survive.
+        $atForm = {
+            param($t)
+            $p = $t.LastIndexOf('@')
+            if ($p -gt 0) { & $report ($t.Substring(0, $p) + '@' + $t.Substring($p + 1)) }
+        }
+        # "name/version" (pnpm 5.x keys) -> split at the LAST slash.
+        $slashForm = {
+            param($t)
+            $p = $t.LastIndexOf('/')
+            if ($p -gt 0) { & $report ($t.Substring(0, $p) + '@' + $t.Substring($p + 1)) }
+        }
+        $token = {
+            param($t)
+            if ([string]::IsNullOrEmpty($t)) { return }
+            if ($t.StartsWith('/')) { $t = $t.Substring(1) }
+            if ($t.EndsWith(':')) { $t = $t.Substring(0, $t.Length - 1) }
+            if ($t -eq '') { return }
+            $t = $t.Replace('@npm:', '@')
+            # Both forms are tried; each self-guards. A scoped name starts with
+            # "@", so requiring the @ past index 0 would wrongly reject
+            # "@cacheable/memory@2.2.1".
+            & $atForm $t
+            & $slashForm $t
+        }
+
+        foreach ($rawLine in ($text -split "`n")) {
+            $line = $rawLine.TrimEnd("`r")
+
+            # 1. Resolved registry tarball URL: .../<name>/-/<base>-<ver>.tgz
+            #    Covers npm v1/v2/v3, npm-shrinkwrap, yarn v1, and bun.lockb.
+            $i = $line.IndexOf('/-/')
+            if ($i -gt 3) {
+                $rest = $line.Substring($i + 3)
+                $j = $rest.IndexOf('.tgz')
+                if ($j -gt 1) {
+                    $basever = $rest.Substring(0, $j)
+                    $pre = $line.Substring(0, $i)
+                    $k = $pre.LastIndexOf('/')
+                    if ($k -ge 0) {
+                        $last = $pre.Substring($k + 1)
+                        $pre2 = $pre.Substring(0, $k)
+                        $k2 = $pre2.LastIndexOf('/')
+                        $prev = if ($k2 -ge 0) { $pre2.Substring($k2 + 1) } else { $pre2 }
+                        # A scope only counts if the preceding segment starts with @.
+                        $nm = if ($prev.StartsWith('@')) { "$prev/$last" } else { $last }
+                        if ($basever.StartsWith("$last-")) {
+                            & $report ($nm + '@' + $basever.Substring($last.Length + 1))
+                        }
+                    }
+                }
+            }
+
+            # 2. Every quoted token: yarn berry resolutions, bun.lock entries, and
+            #    quoted pnpm mapping keys.
+            $parts = $line.Split('"')
+            for ($m = 1; $m -lt $parts.Count; $m += 2) { & $token $parts[$m] }
+            $parts = $line.Split("'")
+            for ($m = 1; $m -lt $parts.Count; $m += 2) { & $token $parts[$m] }
+
+            # 3. Bare pnpm mapping key: indented, ends in a colon.
+            if ($line -match '^[ \t]+[^ \t"'']+:[ \t]*$') { & $token $line.Trim() }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Candidate selection (spec section 6)
 # ---------------------------------------------------------------------------
 function Select-Candidates {
@@ -598,7 +744,9 @@ function Get-ExitCode {
 function Write-TextReport {
     param([string[]] $Roots)
 
-    $useColor = -not $NoColor -and -not $env:NO_COLOR
+    # Suppress colour when stdout is not a console, matching the sh scanner's
+    # [ -t 1 ] guard, so redirected or piped output stays plain.
+    $useColor = -not $NoColor -and -not $env:NO_COLOR -and -not [Console]::IsOutputRedirected
     $verdict = Get-Verdict
     $confirmed = @($script:Findings | Where-Object { $_.Severity -eq 'CONFIRMED' }).Count
     $suspect = @($script:Findings | Where-Object { $_.Severity -eq 'SUSPECT' }).Count
@@ -723,8 +871,8 @@ function Invoke-Main {
         Stop-WithError $EXIT_USAGE "-TimeoutSeconds must be between 10 and 86400, got: $TimeoutSeconds"
     }
 
-    $sigFiles = Resolve-SignatureFiles -Requested $SignaturePath
-    $signatures = Import-Signatures -Files $sigFiles
+    $sigFiles = @(Resolve-SignatureFiles -Requested $SignaturePath)
+    $signatures = @(Import-Signatures -Files $sigFiles)
 
     if ($Path) {
         foreach ($p in $Path) {
@@ -734,7 +882,7 @@ function Invoke-Main {
         }
         $roots = @($Path | ForEach-Object { (Get-Item -LiteralPath $_).FullName } | Select-Object -Unique)
     } else {
-        $roots = Get-DefaultScanPaths
+        $roots = @(Get-DefaultScanPaths)
     }
     if ($roots.Count -eq 0) {
         Stop-WithError $EXIT_ERROR 'no scannable roots found; pass -Path explicitly'
@@ -765,13 +913,17 @@ function Invoke-Main {
     $allFilesArr = @($allFiles)
     $script:FilesWalked = $allFilesArr.Count
 
-    $candidates = Select-Candidates -AllFiles $allFilesArr -Signatures $signatures
+    # Wrap in @(): a PowerShell function returning an empty array yields $null,
+    # and under Set-StrictMode reading .Count on $null throws. A scan whose
+    # candidate set is legitimately empty must not crash.
+    $candidates = @(Select-Candidates -AllFiles $allFilesArr -Signatures $signatures)
     Write-Diag "$($script:FilesWalked) files walked, $($candidates.Count) candidates"
 
     Invoke-PathExistsCheck -Signatures $signatures -HomeDirs $homeDirs
     Invoke-FilenameCheck -Signatures $signatures -Candidates $candidates
     Invoke-PathGlobCheck -Signatures $signatures -Candidates $candidates
     Invoke-PkgVerCheck -Signatures $signatures -AllFiles $allFilesArr
+    Invoke-LockfileCheck -Signatures $signatures -AllFiles $allFilesArr
     Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
     Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
     Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'

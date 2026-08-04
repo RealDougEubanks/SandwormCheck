@@ -55,6 +55,9 @@ NO_COLOR=0
 WORKDIR=""
 FINDINGS_FILE=""
 CANDIDATES_FILE=""
+HASHCAND_FILE=""
+CONTENTCAND_FILE=""
+STAT_MODE=""
 SIGFILES=""
 HASH_SHA256=""
 HASH_SHA1=""
@@ -70,7 +73,9 @@ CAMPAIGNS=""
 # ---------------------------------------------------------------------------
 err() { printf '%s: %s\n' "$PROGNAME" "$*" >&2; }
 warn() { printf '%s: warning: %s\n' "$PROGNAME" "$*" >&2; }
-info() { [ "$VERBOSE" -eq 1 ] && printf '%s: %s\n' "$PROGNAME" "$*" >&2 || :; }
+# Progress lines carry elapsed seconds so a slow stage is identifiable from the
+# output rather than by guesswork.
+info() { [ "$VERBOSE" -eq 1 ] && printf '%s: [%4ss] %s\n' "$PROGNAME" "$(elapsed)" "$*" >&2 || :; }
 
 die() {
 	code=$1
@@ -264,6 +269,39 @@ file_size() {
 	stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null || printf '0'
 }
 
+probe_stat() {
+	# Pick the batched stat form once. BSD and GNU stat take different flags but
+	# both accept many paths per invocation, which is what makes size filtering
+	# affordable on a large tree.
+	if stat -f '%z' . >/dev/null 2>&1; then
+		STAT_MODE="bsd"
+	elif stat -c '%s' . >/dev/null 2>&1; then
+		STAT_MODE="gnu"
+	else
+		STAT_MODE=""
+		warn "no usable stat(1); --max-file-size will be enforced one file at a time"
+	fi
+}
+
+size_filter() {
+	# stdin: newline-separated paths. stdout: those at or under --max-file-size.
+	#
+	# Note: a path containing a literal tab is dropped here. Such a path also
+	# cannot be represented in the pipe-delimited findings format, so it is out of
+	# scope rather than silently mishandled.
+	if [ "$STAT_MODE" = "bsd" ]; then
+		tr '\n' '\0' | xargs -0 -n 200 stat -f '%z	%N' 2>/dev/null || :
+	elif [ "$STAT_MODE" = "gnu" ]; then
+		tr '\n' '\0' | xargs -0 -n 200 stat -c '%s	%n' 2>/dev/null || :
+	else
+		# No batched stat: fall back to one call per file. Correct, just slower.
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			printf '%s\t%s\n' "$(file_size "$f")" "$f"
+		done
+	fi | awk -F'\t' -v m="$MAX_FILE_SIZE" 'NF>=2 && $1+0 <= m { sub(/^[^\t]*\t/, ""); print }'
+}
+
 host_id() {
 	_hn=$(hostname 2>/dev/null || printf 'unknown')
 	_machine=""
@@ -336,69 +374,67 @@ load_signatures() {
 		_sigver=$(sed -n 's/^#![[:space:]]*version[[:space:]]\{1,\}//p' "$f" | head -1)
 		CAMPAIGNS="$CAMPAIGNS$_campaign (${_sigver:-unversioned})
 "
-		_lineno=0
-		while IFS= read -r line || [ -n "$line" ]; do
-			_lineno=$((_lineno + 1))
-			# Strip CR so CRLF-edited signature files still parse.
-			line=$(printf '%s' "$line" | tr -d '\r')
-			case $line in
-			'' | '#'*) continue ;;
-			esac
+		# Parse and validate in one awk pass. The equivalent shell loop spawns
+		# roughly fifteen processes per record, which takes about a minute on a
+		# few thousand signatures — slow enough that operators would skip runs.
+		#
+		# A malformed record is a hard error, not a skipped line: silently
+		# dropping it would shrink coverage invisibly and could report a host as
+		# clean when the check never ran.
+		awk -v file="$f" '
+			function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+			function fail(lineno, msg) {
+				printf "%s:%d: %s\n", file, lineno, msg > "/dev/stderr"
+				bad = 1
+				exit 1
+			}
+			{ sub(/\r$/, "") }                       # tolerate CRLF-edited files
+			/^[ \t]*$/ { next }
+			/^[ \t]*#/ { next }
+			{
+				n = split($0, f, "|")
+				if (n < 5) fail(FNR, "expected 5 pipe-delimited fields, got " n)
+				type = trim(f[1]); sev = trim(f[2]); id = trim(f[3]); pat = trim(f[4])
+				desc = f[5]
+				for (i = 6; i <= n; i++) desc = desc "|" f[i]
+				desc = trim(desc)
 
-			_type=$(printf '%s' "$line" | cut -d'|' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-			_sev=$(printf '%s' "$line" | cut -d'|' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-			_id=$(printf '%s' "$line" | cut -d'|' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-			_pat=$(printf '%s' "$line" | cut -d'|' -f4 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-			_desc=$(printf '%s' "$line" | cut -d'|' -f5- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+				if (type !~ /^(PATHEXISTS|PATHGLOB|FILENAME|SHA256|SHA1|PKGVER|CONTENT)$/)
+					fail(FNR, "unknown check type \x27" type "\x27")
+				if (sev != "CONFIRMED" && sev != "SUSPECT")
+					fail(FNR, "severity must be CONFIRMED or SUSPECT, got \x27" sev "\x27")
+				if (id == "")   fail(FNR, "empty signature ID")
+				if (pat == "")  fail(FNR, "empty pattern for " id)
+				if (desc == "") fail(FNR, "empty description for " id)
 
-			# A malformed record must be a hard error. Skipping it would
-			# silently shrink coverage and could report a clean host.
-			case $_type in
-			PATHEXISTS | PATHGLOB | FILENAME | SHA256 | SHA1 | PKGVER | CONTENT) ;;
-			*) die "$EXIT_ERROR" "$f:$_lineno: unknown check type '$_type'" ;;
-			esac
-			case $_sev in
-			CONFIRMED | SUSPECT) ;;
-			*) die "$EXIT_ERROR" "$f:$_lineno: severity must be CONFIRMED or SUSPECT, got '$_sev'" ;;
-			esac
-			[ -n "$_id" ] || die "$EXIT_ERROR" "$f:$_lineno: empty signature ID"
-			[ -n "$_pat" ] || die "$EXIT_ERROR" "$f:$_lineno: empty pattern for $_id"
-			[ -n "$_desc" ] || die "$EXIT_ERROR" "$f:$_lineno: empty description for $_id"
+				if (type == "SHA256") {
+					if (pat !~ /^[0-9a-fA-F]{64}$/)
+						fail(FNR, id ": SHA256 must be 64 hex characters, got " length(pat))
+					pat = tolower(pat)
+				} else if (type == "SHA1") {
+					if (pat !~ /^[0-9a-fA-F]{40}$/)
+						fail(FNR, id ": SHA1 must be 40 hex characters, got " length(pat))
+					pat = tolower(pat)
+				} else if (type == "PKGVER") {
+					if (index(pat, "@") == 0)
+						fail(FNR, id ": PKGVER must be name@version")
+				}
 
-			case $_type in
-			SHA256)
-				validate_hex "$_pat" 64 ||
-					die "$EXIT_ERROR" "$f:$_lineno: $_id: SHA256 must be 64 hex characters, got ${#_pat}"
-				_pat=$(printf '%s' "$_pat" | tr 'A-F' 'a-f')
-				;;
-			SHA1)
-				validate_hex "$_pat" 40 ||
-					die "$EXIT_ERROR" "$f:$_lineno: $_id: SHA1 must be 40 hex characters, got ${#_pat}"
-				_pat=$(printf '%s' "$_pat" | tr 'A-F' 'a-f')
-				;;
-			PKGVER)
-				case $_pat in
-				*@*) ;;
-				*) die "$EXIT_ERROR" "$f:$_lineno: $_id: PKGVER must be name@version" ;;
-				esac
-				;;
-			esac
-
-			printf '%s|%s|%s|%s|%s\n' "$_type" "$_sev" "$_id" "$_pat" "$_desc" >>"$WORKDIR/sigs"
-			_total=$((_total + 1))
-		done <"$f"
+				printf "%s|%s|%s|%s|%s\n", type, sev, id, pat, desc
+				kept++
+			}
+			END { if (!bad) printf "%d records\n", kept > "/dev/stderr" }
+		' "$f" >>"$WORKDIR/sigs" 2>"$WORKDIR/sigerr" ||
+			die "$EXIT_ERROR" "$(head -1 "$WORKDIR/sigerr")"
 	done
+
+	# A campaign split across several files (indicators in one, generated package
+	# versions in another) declares the same name in each; list it once.
+	CAMPAIGNS=$(printf '%s' "$CAMPAIGNS" | awk 'NF && !seen[$0]++')
+
+	_total=$(grep -c '|' "$WORKDIR/sigs" 2>/dev/null || printf '0')
 	[ "$_total" -gt 0 ] || die "$EXIT_ERROR" "no valid signature records loaded"
 	info "loaded $_total signature records"
-}
-
-validate_hex() {
-	# validate_hex <string> <expected_length>
-	[ "${#1}" -eq "$2" ] || return 1
-	case $1 in
-	*[!0-9a-fA-F]*) return 1 ;;
-	esac
-	return 0
 }
 
 sigs_of_type() {
@@ -487,103 +523,405 @@ glob_report() {
 }
 
 check_filenames_and_globs() {
-	# Single pass over the candidate file list for FILENAME and PATHGLOB.
-	sigs_of_type FILENAME | while IFS='|' read -r _t _sev _id _pat _desc; do
-		[ -n "$_id" ] || continue
-		awk -v pat="$_pat" -F/ '$NF==pat' "$CANDIDATES_FILE" |
-			while IFS= read -r hit; do
-				[ -n "$hit" ] || continue
-				printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$hit" "filename match" "$_desc" >>"$FINDINGS_FILE"
-			done
-	done
+	# One awk pass over the candidate list for both types. The previous form ran
+	# a shell `while read` loop per signature over the whole list, which on a real
+	# tree of a few hundred thousand candidates costs seconds per signature.
+	[ -s "$CANDIDATES_FILE" ] || return 0
 
-	sigs_of_type PATHGLOB | while IFS='|' read -r _t _sev _id _pat _desc; do
-		[ -n "$_id" ] || continue
-		while IFS= read -r hit; do
-			[ -n "$hit" ] || continue
-			# shellcheck disable=SC2254  # glob match is intentional
-			case $hit in
-			$_pat)
-				printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$hit" "path glob match" "$_desc" >>"$FINDINGS_FILE"
-				;;
-			esac
-		done <"$CANDIDATES_FILE"
-	done
+	awk -F'|' '
+		function globToRe(g,   out, i, c) {
+			# Signature globs use only * and ?, so a small translation is enough.
+			out = "^"
+			for (i = 1; i <= length(g); i++) {
+				c = substr(g, i, 1)
+				if (c == "*") out = out ".*"
+				else if (c == "?") out = out "."
+				else if (c ~ /[.\[\]()+^$\\{}|\/]/) out = out "\\" c
+				else out = out c
+			}
+			return out "$"
+		}
+		$1=="FILENAME" || $1=="PATHGLOB" {
+			desc=$5
+			for (i=6; i<=NF; i++) desc = desc "|" $i
+			n++
+			type[n]=$1; sev[n]=$2; id[n]=$3; pat[n]=$4; d[n]=desc
+			if ($1=="PATHGLOB") re[n] = globToRe($4)
+		}
+		END { for (i=1; i<=n; i++) printf "%s\t%s\t%s\t%s\t%s\t%s\n", type[i], sev[i], id[i], pat[i], d[i], re[i] }
+	' "$WORKDIR/sigs" >"$WORKDIR/fnsigs" 2>/dev/null || :
+	[ -s "$WORKDIR/fnsigs" ] || return 0
+
+	awk -v sigfile="$WORKDIR/fnsigs" '
+		BEGIN {
+			FS = "\t"
+			while ((getline line < sigfile) > 0) {
+				split(line, f, "\t")
+				n++
+				type[n]=f[1]; sev[n]=f[2]; id[n]=f[3]; pat[n]=f[4]; d[n]=f[5]; re[n]=f[6]
+				if (f[1] == "FILENAME") byname[f[4]] = byname[f[4]] n ","
+			}
+			close(sigfile)
+			FS = "\n"
+		}
+		{
+			path = $0
+			slash = 0
+			for (i = length(path); i > 0; i--) if (substr(path, i, 1) == "/") { slash = i; break }
+			leaf = slash ? substr(path, slash+1) : path
+
+			if (leaf in byname) {
+				cnt = split(byname[leaf], idx, ",")
+				for (j = 1; j <= cnt; j++) {
+					k = idx[j] + 0
+					if (k) printf "%s|%s|%s|filename match|%s\n", sev[k], id[k], path, d[k]
+				}
+			}
+			for (k = 1; k <= n; k++) {
+				if (type[k] == "PATHGLOB" && path ~ re[k])
+					printf "%s|%s|%s|path glob match|%s\n", sev[k], id[k], path, d[k]
+			}
+		}
+	' "$CANDIDATES_FILE" >>"$FINDINGS_FILE" 2>/dev/null || :
 }
 
 check_hashes() {
 	# check_hashes <lowercase_algo> <uppercase_check_type>
+	#
+	# Hashes are computed in batches: sha256sum/shasum accept many paths per
+	# invocation and print "digest  path". Spawning one hasher per file costs tens
+	# of thousands of processes on a real dependency tree and takes minutes.
+	# Digests are then matched against a lookup table in one awk pass, so cost
+	# scales with files rather than files times signatures.
 	_algo=$1
 	_type=$2
 	_sigs=$(sigs_of_type "$_type")
 	[ -n "$_sigs" ] || return 0
-	if [ "$_algo" = "sha256" ] && [ -z "$HASH_SHA256" ]; then return 0; fi
-	if [ "$_algo" = "sha1" ] && [ -z "$HASH_SHA1" ]; then return 0; fi
+	[ -s "$HASHCAND_FILE" ] || return 0
 
-	while IFS= read -r f; do
-		[ -n "$f" ] || continue
-		[ -f "$f" ] && [ -r "$f" ] || continue
-		_sz=$(file_size "$f")
-		[ "$_sz" -le "$MAX_FILE_SIZE" ] || continue
-		_d=$(hash_file "$_algo" "$f")
-		[ -n "$_d" ] || continue
-		printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
-			[ -n "$_id" ] || continue
-			if [ "$_d" = "$_pat" ]; then
-				printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$f" "$_type match" "$_desc" >>"$FINDINGS_FILE"
-			fi
-		done
-	done <"$CANDIDATES_FILE"
+	_hasher=""
+	if [ "$_algo" = "sha256" ]; then _hasher=$HASH_SHA256; else _hasher=$HASH_SHA1; fi
+	[ -n "$_hasher" ] || return 0
+
+	# digest -> SEV|ID|DESC
+	awk -F'|' -v t="$_type" '
+		$1==t {
+			desc=$5
+			for (i=6; i<=NF; i++) desc = desc "|" $i
+			printf "%s\t%s|%s|%s\n", $4, $2, $3, desc
+		}
+	' "$WORKDIR/sigs" >"$WORKDIR/hmap.$_algo" 2>/dev/null || :
+	[ -s "$WORKDIR/hmap.$_algo" ] || return 0
+
+	if [ "$_hasher" = "openssl_256" ] || [ "$_hasher" = "openssl_1" ]; then
+		# openssl prints "SHA256(path)= digest" and has no batch-friendly form
+		# worth parsing; it is the last-resort fallback, so keep it simple.
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			_d=$(hash_file "$_algo" "$f")
+			[ -n "$_d" ] || continue
+			printf '%s\t%s\n' "$_d" "$f"
+		done <"$HASHCAND_FILE" >"$WORKDIR/digests.$_algo"
+	else
+		# shellcheck disable=SC2086  # $_hasher is a command plus its flags
+		tr '\n' '\0' <"$HASHCAND_FILE" |
+			xargs -0 -n 200 $_hasher 2>/dev/null |
+			awk '{ d=$1; $1=""; sub(/^[ \t]+/, ""); printf "%s\t%s\n", tolower(d), $0 }' \
+				>"$WORKDIR/digests.$_algo" || :
+	fi
+
+	awk -F'\t' -v mapfile="$WORKDIR/hmap.$_algo" -v t="$_type" '
+		BEGIN {
+			while ((getline line < mapfile) > 0) {
+				p = index(line, "\t")
+				if (p) want[substr(line, 1, p-1)] = substr(line, p+1)
+			}
+			close(mapfile)
+		}
+		$1 in want {
+			split(want[$1], f, "|")
+			desc = f[3]
+			for (i = 4; i in f; i++) desc = desc "|" f[i]
+			printf "%s|%s|%s|%s match|%s\n", f[1], f[2], $2, t, desc
+		}
+	' "$WORKDIR/digests.$_algo" >>"$FINDINGS_FILE" 2>/dev/null || :
 }
 
 check_content() {
+	# One batched grep over many files at a time rather than a grep per pattern
+	# per file. The per-file form costs (patterns + 1) processes for every
+	# candidate, which on a real dependency tree is hundreds of thousands of
+	# processes and takes minutes.
 	_sigs=$(sigs_of_type CONTENT)
 	[ -n "$_sigs" ] || return 0
-	while IFS= read -r f; do
-		[ -n "$f" ] || continue
-		[ -f "$f" ] && [ -r "$f" ] || continue
-		_sz=$(file_size "$f")
-		[ "$_sz" -le "$MAX_FILE_SIZE" ] || continue
-		printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
-			[ -n "$_id" ] || continue
-			# -F: literal substring, no regex dialect surprises.
-			# -q: stop at first match. -s: suppress unreadable-file noise.
-			if grep -qFs -- "$_pat" "$f" 2>/dev/null; then
-				printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$f" "content match" "$_desc" >>"$FINDINGS_FILE"
-			fi
+	[ -s "$CONTENTCAND_FILE" ] || return 0
+
+	# Literal patterns for the batched pass, plus a pattern -> signature map.
+	: >"$WORKDIR/cpat"
+	: >"$WORKDIR/cmap"
+	printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
+		[ -n "$_id" ] || continue
+		printf '%s\n' "$_pat" >>"$WORKDIR/cpat"
+		printf '%s\t%s|%s|%s\n' "$_pat" "$_sev" "$_id" "$_desc" >>"$WORKDIR/cmap"
+	done
+	[ -s "$WORKDIR/cpat" ] || return 0
+
+	# -o with -H gives path:pattern per hit. -a so a binary payload does not
+	# suppress output. xargs batches the file list; -n keeps the argument list
+	# under the platform limit.
+	# Two stages. `grep -l` stops at the first match per file and keeps grep on its
+	# fast fixed-string path, so the broad sweep over every candidate is as cheap
+	# as possible. Only the few files that matched are then re-read with `-o` to
+	# learn which pattern hit, which is the expensive mode.
+	#
+	# NUL-delimited so paths containing spaces survive xargs. -a because a binary
+	# payload must not suppress output.
+	: >"$WORKDIR/chits"
+	tr '\n' '\0' <"$CONTENTCAND_FILE" |
+		xargs -0 -n 200 grep -laFf "$WORKDIR/cpat" 2>/dev/null |
+		sort -u >"$WORKDIR/chits" || :
+	[ -s "$WORKDIR/chits" ] || return 0
+
+	tr '\n' '\0' <"$WORKDIR/chits" |
+		xargs -0 -n 50 grep -oaHFf "$WORKDIR/cpat" 2>/dev/null |
+		sort -u |
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			# grep -H output is path:matched-text. A path may itself contain ':',
+			# so split on the LAST occurrence of a known pattern instead: look up
+			# each candidate pattern as a suffix.
+			_hitpat=""
+			_path=""
+			while IFS= read -r p; do
+				[ -n "$p" ] || continue
+				case $line in
+				*":$p")
+					_hitpat=$p
+					_path=${line%":$p"}
+					break
+					;;
+				esac
+			done <"$WORKDIR/cpat"
+			[ -n "$_hitpat" ] || continue
+			_rec=$(awk -F'\t' -v h="$_hitpat" '$1==h {print $2; exit}' "$WORKDIR/cmap")
+			[ -n "$_rec" ] || continue
+			_sev=$(printf '%s' "$_rec" | cut -d'|' -f1)
+			_id=$(printf '%s' "$_rec" | cut -d'|' -f2)
+			_desc=$(printf '%s' "$_rec" | cut -d'|' -f3-)
+			printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$_path" "content match" "$_desc" >>"$FINDINGS_FILE"
 		done
-	done <"$CANDIDATES_FILE"
+}
+
+build_pkgver_lookup() {
+	# name@version -> SEV|ID|DESC, one record per line. Built once so the checks
+	# below are a hash lookup rather than a scan of every signature per file:
+	# with a few thousand PKGVER records the nested-loop form is unusably slow.
+	awk -F'|' '
+		$1=="PKGVER" {
+			desc=$5
+			for (i=6; i<=NF; i++) desc = desc "|" $i
+			printf "%s\t%s|%s|%s\n", $4, $2, $3, desc
+		}
+	' "$WORKDIR/sigs" >"$WORKDIR/pkgmap" 2>/dev/null || :
+	[ -s "$WORKDIR/pkgmap" ]
 }
 
 check_pkgver() {
-	_sigs=$(sigs_of_type PKGVER)
-	[ -n "$_sigs" ] || return 0
+	build_pkgver_lookup || return 0
+
 	# Only package.json files directly inside a package directory matter.
-	grep -F 'package.json' "$WORKDIR/allfiles" 2>/dev/null |
-		while IFS= read -r pj; do
-			case $pj in
-			*/package.json) ;;
+	grep -F '/package.json' "$WORKDIR/allfiles" 2>/dev/null |
+		awk -v mapfile="$WORKDIR/pkgmap" -v maxsize="$MAX_FILE_SIZE" '
+		BEGIN {
+			FS = "\t"
+			while ((getline line < mapfile) > 0) {
+				t = index(line, "\t")
+				if (t) want[substr(line, 1, t-1)] = substr(line, t+1)
+			}
+			close(mapfile)
+		}
+		{
+			pj = $0
+			if (pj !~ /\/package\.json$/) next
+
+			# Extract the first "name" and "version", which in an npm-generated
+			# manifest are the package own. Avoids a full JSON parse so a
+			# manifest with trailing garbage still yields a usable answer.
+			name = ""; ver = ""; n = 0
+			while ((getline l < pj) > 0) {
+				if (++n > 400) break        # own metadata is at the top
+				if (name == "" && match(l, /"name"[ \t]*:[ \t]*"[^"]*"/)) {
+					s = substr(l, RSTART, RLENGTH)
+					sub(/^"name"[ \t]*:[ \t]*"/, "", s); sub(/"$/, "", s)
+					name = s
+				}
+				if (ver == "" && match(l, /"version"[ \t]*:[ \t]*"[^"]*"/)) {
+					s = substr(l, RSTART, RLENGTH)
+					sub(/^"version"[ \t]*:[ \t]*"/, "", s); sub(/"$/, "", s)
+					ver = s
+				}
+				if (name != "" && ver != "") break
+			}
+			close(pj)
+			if (name == "" || ver == "") next
+
+			nv = name "@" ver
+			if (nv in want) {
+				split(want[nv], f, "|")
+				desc = f[3]
+				for (i = 4; i in f; i++) desc = desc "|" f[i]
+				printf "%s|%s|%s|installed %s|%s\n", f[1], f[2], pj, nv, desc
+			}
+		}
+	' >>"$FINDINGS_FILE" 2>/dev/null || :
+}
+
+# ---------------------------------------------------------------------------
+# Lockfile pins (spec §4.2)
+#
+# check_pkgver only sees packages that are actually installed. A project that
+# pins a compromised version in its lockfile but has never had `npm install`
+# run on this host is equally in need of remediation, and will reintroduce the
+# bad version on the next install. These checks read the lockfile directly.
+# ---------------------------------------------------------------------------
+# bun.lockb is binary but not opaque: it embeds registry tarball URLs as
+# contiguous ASCII, so the resolved-URL patterns work on it with grep -a. A miss
+# in a .lockb is less conclusive than a miss in a text lockfile, because its
+# non-registry entries are not readable this way.
+LOCKFILE_NAMES="package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml bun.lock bun.lockb"
+
+check_lockfiles() {
+	# Extract every (name, version) pair the lockfile actually declares, then look
+	# each one up in the PKGVER table. One awk pass per lockfile, independent of
+	# how many signatures are loaded.
+	#
+	# The earlier approach generated a literal pattern per signature per format
+	# (~16,000 patterns for this campaign) and ran `grep -Ff` over each lockfile.
+	# That measured 30-60s on a single 175 KB pnpm lockfile — BSD grep degrades
+	# badly with a large -f pattern file — which made a fleet scan unusable.
+	#
+	# Parsing structurally is also more precise than substring matching: the name
+	# and version are recovered as fields, so an unscoped signature cannot match a
+	# scoped package that merely shares its basename.
+	build_pkgver_lookup || return 0
+
+	: >"$WORKDIR/locknames"
+	for n in $LOCKFILE_NAMES; do
+		printf '/%s\n' "$n" >>"$WORKDIR/locknames"
+	done
+
+	grep -Fs -f "$WORKDIR/locknames" "$WORKDIR/allfiles" 2>/dev/null |
+		while IFS= read -r lf; do
+			[ -n "$lf" ] || continue
+			_leaf=${lf##*/}
+			case " $LOCKFILE_NAMES " in
+			*" $_leaf "*) ;;
 			*) continue ;;
 			esac
-			[ -r "$pj" ] || continue
-			_sz=$(file_size "$pj")
-			[ "$_sz" -le "$MAX_FILE_SIZE" ] || continue
+			# A lockfile nested inside node_modules is a dependency's own dev
+			# lockfile. npm, yarn, and pnpm all ignore those when resolving, so a
+			# hit there would be a misleading finding as well as wasted work.
+			# npm-shrinkwrap.json is the exception: npm does honor a shipped one.
+			case $lf in
+			*/node_modules/*)
+				[ "$_leaf" = "npm-shrinkwrap.json" ] || continue
+				;;
+			esac
+			[ -f "$lf" ] && [ -r "$lf" ] || continue
+			_sz=$(file_size "$lf")
+			if [ "$_sz" -gt "$MAX_FILE_SIZE" ]; then
+				info "lockfile skipped (over --max-file-size): $lf"
+				continue
+			fi
 
-			# Extract the top-level "name" and "version" without a JSON parser.
-			# Nested deps declare their own name/version inside objects, so take
-			# the first occurrence of each, which in npm-generated manifests is
-			# the package's own.
-			_name=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" 2>/dev/null | head -1)
-			_ver=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" 2>/dev/null | head -1)
-			[ -n "$_name" ] && [ -n "$_ver" ] || continue
-			_nv="$_name@$_ver"
+			# tr NUL -> newline so bun.lockb, which is binary but stores registry
+			# URLs as contiguous ASCII, can be parsed by the same program.
+			tr '\0' '\n' <"$lf" 2>/dev/null |
+				awk -v mapfile="$WORKDIR/pkgmap" -v lf="$lf" -v leaf="$_leaf" '
+				BEGIN {
+					while ((getline line < mapfile) > 0) {
+						t = index(line, "\t")
+						if (t) want[substr(line, 1, t-1)] = substr(line, t+1)
+					}
+					close(mapfile)
+				}
+				function report(nv) {
+					if (!(nv in want)) return
+					if (seen[nv]++) return
+					split(want[nv], f, "|")
+					desc = f[3]
+					for (i = 4; i in f; i++) desc = desc "|" f[i]
+					printf "%s|%s|%s|pinned %s in %s|%s\n", f[1], f[2], lf, nv, leaf, desc
+				}
+				# "name@version" -> split at the LAST @ so scoped names survive.
+				function atForm(t,   p, i) {
+					p = 0
+					for (i = length(t); i > 1; i--) if (substr(t, i, 1) == "@") { p = i; break }
+					if (p > 1) report(substr(t, 1, p-1) "@" substr(t, p+1))
+				}
+				# "name/version" (pnpm 5.x keys) -> split at the LAST slash.
+				function slashForm(t,   p, i) {
+					p = 0
+					for (i = length(t); i > 1; i--) if (substr(t, i, 1) == "/") { p = i; break }
+					if (p > 1) report(substr(t, 1, p-1) "@" substr(t, p+1))
+				}
+				function token(t) {
+					sub(/^\//, "", t)
+					sub(/:$/, "", t)
+					if (t == "") return
+					gsub(/@npm:/, "@", t)
+					# Both forms are tried; each self-guards on finding its
+					# separator past position 1. A scoped name starts with "@", so
+					# testing index(t,"@")>1 would wrongly reject
+					# "@cacheable/memory@2.2.1".
+					atForm(t)
+					slashForm(t)
+				}
+				{
+					line = $0
+					sub(/\r$/, "", line)
 
-			printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
-				[ -n "$_id" ] || continue
-				if [ "$_nv" = "$_pat" ]; then
-					printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$pj" "installed $_nv" "$_desc" >>"$FINDINGS_FILE"
-				fi
-			done
+					# 1. Resolved registry tarball URL: .../<name>/-/<base>-<ver>.tgz
+					#    Covers npm v1/v2/v3, npm-shrinkwrap, yarn v1, and bun.lockb.
+					i = index(line, "/-/")
+					if (i > 3) {
+						rest = substr(line, i + 3)
+						j = index(rest, ".tgz")
+						if (j > 1) {
+							basever = substr(rest, 1, j - 1)
+							pre = substr(line, 1, i - 1)
+							k = 0
+							for (x = length(pre); x > 0; x--) if (substr(pre, x, 1) == "/") { k = x; break }
+							if (k > 0) {
+								last = substr(pre, k + 1)
+								pre2 = substr(pre, 1, k - 1)
+								k2 = 0
+								for (x = length(pre2); x > 0; x--) if (substr(pre2, x, 1) == "/") { k2 = x; break }
+								prev = substr(pre2, k2 + 1)
+								# A scope is only a scope if the preceding segment starts with @.
+								nm = (substr(prev, 1, 1) == "@") ? prev "/" last : last
+								if (substr(basever, 1, length(last) + 1) == last "-") {
+									report(nm "@" substr(basever, length(last) + 2))
+								}
+							}
+						}
+					}
+
+					# 2. Every quoted token: yarn berry resolutions, bun.lock entries,
+					#    and quoted pnpm mapping keys.
+					n = split(line, q, "\"")
+					for (m = 2; m <= n; m += 2) token(q[m])
+					n = split(line, q2, "\x27")
+					for (m = 2; m <= n; m += 2) token(q2[m])
+
+					# 3. Bare pnpm mapping key: two-space indent, ends in a colon.
+					if (line ~ /^[ \t]+[^ \t"\x27]+:[ \t]*$/) {
+						t = line
+						gsub(/^[ \t]+|[ \t]+$/, "", t)
+						token(t)
+					}
+				}
+			' >>"$FINDINGS_FILE" 2>/dev/null || :
 		done
 }
 
@@ -608,20 +946,56 @@ build_file_lists() {
 
 	# Candidates: files the malware is known to write, or files inside the
 	# directories it writes into. Hashing/grepping the whole disk is not viable.
-	_names=$(sigs_of_type FILENAME | cut -d'|' -f4 | sort -u)
+	# Basenames worth looking at: those a FILENAME signature names outright, plus
+	# the trailing component of each PATHGLOB, plus the config and manifest files
+	# the checks always need.
 	: >"$WORKDIR/namepat"
-	printf '%s\n' "$_names" | while IFS= read -r n; do
+	{
+		sigs_of_type FILENAME | cut -d'|' -f4
+		sigs_of_type PATHGLOB | cut -d'|' -f4 | sed 's|.*/||'
+	} | sort -u | while IFS= read -r n; do
 		[ -n "$n" ] || continue
+		case $n in
+		*'*'* | *'?'*) continue ;; # a glob basename is not a usable literal
+		esac
 		printf '/%s\n' "$n" >>"$WORKDIR/namepat"
 	done
 	printf '/settings.json\n/tasks.json\n/package.json\n/setup.mjs\n' >>"$WORKDIR/namepat"
+	sort -u "$WORKDIR/namepat" -o "$WORKDIR/namepat" 2>/dev/null ||
+		{ sort -u "$WORKDIR/namepat" >"$WORKDIR/np.tmp" && mv "$WORKDIR/np.tmp" "$WORKDIR/namepat"; }
 
 	{
 		grep -Fs -f "$WORKDIR/namepat" "$WORKDIR/allfiles" 2>/dev/null || :
 		grep -Es '/(node_modules|\.claude|\.vscode)/' "$WORKDIR/allfiles" 2>/dev/null || :
 	} | sort -u >"$CANDIDATES_FILE"
 
-	info "$(wc -l <"$WORKDIR/allfiles" | tr -d ' ') files walked, $(wc -l <"$CANDIDATES_FILE" | tr -d ' ') candidates"
+	# Hash candidates are deliberately NARROW: only files whose basename a
+	# FILENAME or PATHGLOB signature actually names.
+	#
+	# Hashing reads every byte. A developer machine's node_modules trees measured
+	# 14 GB across 260,000 candidate files here, and hashing that per host is not
+	# something a fleet operator will tolerate — an unrun scan detects nothing.
+	# Every published hash for this campaign belongs to a file the malware writes
+	# under a known name, so narrowing by basename loses no real coverage. If a
+	# signature set has hash records with no matching basename, that IS a coverage
+	# gap and is reported loudly below rather than passing silently.
+	grep -Fs -f "$WORKDIR/namepat" "$CANDIDATES_FILE" 2>/dev/null |
+		size_filter | sort -u >"$HASHCAND_FILE" || :
+
+	if [ ! -s "$HASHCAND_FILE" ] && [ -n "$(sigs_of_type SHA256)$(sigs_of_type SHA1)" ]; then
+		warn "hash signatures are loaded but no file matched a FILENAME or PATHGLOB basename; hash checks will find nothing. Add a FILENAME record for the basename you are hashing (see docs/signatures.md)."
+	fi
+
+	# Content candidates keep full breadth but are size-bounded, so one oversized
+	# artifact cannot dominate the scan.
+	#
+	# CANDIDATES_FILE itself stays UNFILTERED. FILENAME and PATHGLOB match on the
+	# path alone and must not depend on file size — an oversized payload is still
+	# detectable by name, and size-filtering before those checks would silently
+	# miss it.
+	size_filter <"$CANDIDATES_FILE" | sort -u >"$CONTENTCAND_FILE" || :
+
+	info "$(wc -l <"$WORKDIR/allfiles" | tr -d ' ') files walked, $(wc -l <"$CANDIDATES_FILE" | tr -d ' ') candidates, $(wc -l <"$CONTENTCAND_FILE" | tr -d ' ') content, $(wc -l <"$HASHCAND_FILE" | tr -d ' ') hash"
 }
 
 tally() {
@@ -782,11 +1156,16 @@ main() {
 		die "$EXIT_ERROR" "cannot create temporary directory"
 	FINDINGS_FILE="$WORKDIR/findings"
 	CANDIDATES_FILE="$WORKDIR/candidates"
+	HASHCAND_FILE="$WORKDIR/hashcand"
+	CONTENTCAND_FILE="$WORKDIR/contentcand"
 	: >"$FINDINGS_FILE"
 	: >"$CANDIDATES_FILE"
+	: >"$HASHCAND_FILE"
+	: >"$CONTENTCAND_FILE"
 	: >"$WORKDIR/skipped"
 
 	probe_hashers
+	probe_stat
 	HOSTID=$(host_id)
 
 	resolve_signatures
@@ -818,6 +1197,8 @@ main() {
 	check_filenames_and_globs
 	info "checking package versions"
 	check_pkgver
+	info "checking lockfile pins"
+	check_lockfiles
 	info "checking content markers"
 	check_content
 	info "checking hashes"

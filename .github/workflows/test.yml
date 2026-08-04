@@ -1,0 +1,87 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: shell scanner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dash and shellcheck
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dash shellcheck
+
+      - name: Install shellcheck
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Lint
+        run: shellcheck -s sh bunwormcheck.sh tests/run-tests.sh
+
+      - name: Test across shells
+        run: SHELLS="sh bash dash" ./tests/run-tests.sh
+
+  powershell:
+    name: PowerShell port (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path ./BunWormCheck.ps1 -Severity Error,Warning
+          $issues | Format-Table -AutoSize
+          if ($issues) { exit 1 }
+
+      - name: Verdict tiers and exit codes
+        shell: pwsh
+        run: |
+          $cases = @(
+            @{ Tree = 'clean';     Expect = 0  },
+            @{ Tree = 'suspect';   Expect = 10 },
+            @{ Tree = 'confirmed'; Expect = 20 }
+          )
+          $failed = $false
+          foreach ($c in $cases) {
+            & ./BunWormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor
+            if ($LASTEXITCODE -ne $c.Expect) {
+              Write-Host "FAIL $($c.Tree): expected $($c.Expect), got $LASTEXITCODE"
+              $failed = $true
+            } else {
+              Write-Host "ok   $($c.Tree) -> $LASTEXITCODE"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Malformed signatures fail closed
+        shell: pwsh
+        run: |
+          "#!campaign t`nBOGUS|CONFIRMED|X-1|foo|desc" | Set-Content bad.conf
+          & ./BunWormCheck.ps1 -Path tests/fixtures/clean -SignaturePath bad.conf
+          if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: expected 1, got $LASTEXITCODE"; exit 1 }
+          Write-Host 'ok   malformed signature -> 1'
+
+      - name: JSON output is valid and schema-versioned
+        shell: pwsh
+        run: |
+          $out = & ./BunWormCheck.ps1 -Path tests/fixtures/confirmed -SignaturePath signatures -Json
+          $code = $LASTEXITCODE
+          $d = $out | ConvertFrom-Json
+          if ($d.schema -ne 'bunwormcheck/v1') { Write-Host "FAIL: bad schema $($d.schema)"; exit 1 }
+          if ($d.verdict -ne 'CONFIRMED') { Write-Host "FAIL: bad verdict $($d.verdict)"; exit 1 }
+          if ($d.exit_code -ne $code) { Write-Host "FAIL: exit_code $($d.exit_code) != $code"; exit 1 }
+          Write-Host 'ok   JSON schema, verdict, and exit code agree'

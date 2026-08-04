@@ -53,8 +53,10 @@ already gone and you have an incident. See [docs/remediation.md](docs/remediatio
 
 ## What it looks for
 
-The worm's on-disk footprint, drawn from the Wiz, Socket, and CyberKendra write-ups
-(full provenance in [docs/references.md](docs/references.md)):
+The worm's on-disk footprint. **Every indicator in this repository comes from public
+research published by others** — Wiz, Socket, JFrog, CyberKendra, and Aikido. This project
+contributes the scanner, not the threat intelligence. See [Credits](#credits) for who found
+what, and [docs/references.md](docs/references.md) for per-indicator provenance.
 
 - **Payload files** — `Math_Symbol.js` and `math_init.js`, the ~728 KB Bun bundle.
 - **Loader hashes** — known SHA-256 and SHA-1 digests of the payload and both
@@ -81,11 +83,16 @@ whether stolen credentials have been used. Pair it with a registry audit — see
 
 The package list is a point-in-time snapshot taken while the campaign was still
 republishing. No public source found so far enumerates more than the 463 names / 2,255
-versions encoded here — Aikido, the vendor claiming the widest impact, reports 434 names
-across 1,381 versions, and every package it names is covered. That is a good sign, not a
-completeness proof: the worm was active when the lists were collected, and no vendor
-publishes a live feed. **A clean result is not proof of safety** — it means none of the
-encoded indicators were found.
+versions encoded here: Socket's CSV feed (2,236 pairs) is a strict subset, and Aikido, the
+vendor claiming the widest impact, reports 434 names across 1,381 versions with every
+package it names covered. Notably both the Wiz and Socket feeds omit the entire `@keyv/*`
+scope, so the list is a union of three vendors rather than a copy of one — see
+[docs/references.md](docs/references.md). That is a good sign, not a completeness proof:
+the worm was active when the lists were collected. **A clean result is not proof of
+safety** — it means none of the encoded indicators were found.
+
+Refresh the list with `tools/merge-package-list.sh`; see
+[docs/signatures.md](docs/signatures.md#updating-this-campaign).
 
 ## Performance
 
@@ -159,6 +166,27 @@ inert placeholder text — no live malware is in this repo.
 | [docs/references.md](docs/references.md) | Source advisories and IOC provenance |
 | [docs/assumptions.md](docs/assumptions.md) | Recorded design decisions and accepted risks |
 | [docs/ToDo.md](docs/ToDo.md) | Known gaps and planned work |
+
+## Credits
+
+The detection content here is not original research. It is assembled from work published
+by the following teams, each of whom investigated and disclosed this campaign — thanks to
+all of them:
+
+| Source | What this project uses from it |
+|---|---|
+| **[Wiz](https://www.wiz.io/blog/keyv-and-cacheable-npm-supply-chain-attack)** | Payload filenames, SHA-1 hashes, C2 and staging domains, the embedded threat string, the `Shai-Hulud: Here We Go Again` exfil marker, the `Bun/1.3.13` user agent, and the Ethereum-contract C2 discovery mechanism. Their [IOC CSV](https://github.com/wiz-sec-public/wiz-research-iocs/blob/main/reports/keyv-packages.csv) supplied the bulk of the package list. |
+| **[Socket](https://socket.dev/blog/popular-npm-packages-in-the-keyv-and-cacheable-namespaces-compromised-in-active-supply-chain)** | SHA-256 hashes for the payload and both `setup.mjs` loader variants, the full `gh-token-monitor` persistence chain, the targeted credential inventory, and the OIDC trusted-publishing propagation path. Their [CSV feed](https://socket.dev/api/public/supply-chain-attacks/keyv-and-cacheable-compromise/packages.csv) is the most convenient machine-readable package list. |
+| **[JFrog](https://research.jfrog.com/post/shai-hulud-is-back-august/)** | The only published source carrying all 19 `@keyv/*` packages — the campaign's namesake scope, which both the Wiz and Socket feeds omit. Also corrected `file-entry-cache` to `11.1.6`. |
+| **[CyberKendra](https://www.cyberkendra.com/2026/08/npm-worm-hits-keyv-and-cacheable.html)** | Publication timeline, the `file-entry-cache` / `flat-cache` transitive vector, `loginctl enable-linger` on Linux, the 24-hour TTL self-destruct, and the Defender detection name `Trojan:npm/MalBun.A`. |
+| **[Aikido](https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack)** | Independent impact figures used to cross-check package-list coverage, and the community-spread packages outside the keyv/cacheable namespaces. |
+
+The package list is a **union** of these feeds precisely because none of them is complete
+on its own. Where they disagree, `docs/references.md` records the discrepancy and how it
+was resolved — including two cases where a published version number was wrong.
+
+Vendor names and links are attribution only; none of these organisations endorse or are
+affiliated with this tool.
 
 ## Security
 

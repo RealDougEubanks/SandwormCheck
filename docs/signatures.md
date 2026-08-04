@@ -194,16 +194,31 @@ in one pass and each finding is attributed to its own campaign in the report.
 
 ## Updating this campaign
 
-The keyv/cacheable campaign was actively republishing when these indicators were
-collected, and vendors reported 400+ affected packages against the 14 versions encoded
-here. To extend the list:
+The package list is generated, not hand-edited. To refresh it from a vendor feed:
 
-1. Pull the current package list from the Socket campaign page or the vendor CSV linked
-   in `docs/references.md`.
-2. Append `PKGVER|SUSPECT|SH25-Vnnn|name@version|Compromised release` records, continuing
-   the existing numbering.
-3. Bump `#!version` and `#!updated` in the header.
-4. Re-run the suite and commit.
+```sh
+curl -sSf 'https://socket.dev/api/public/supply-chain-attacks/keyv-and-cacheable-compromise/packages.csv' \
+  -o /tmp/socket.csv
 
-Bulk-generating those records from a vendor CSV is fine — just eyeball the diff before
-committing, because a mangled record fails the whole scan closed with exit `1`.
+./tools/merge-package-list.sh /tmp/socket.csv > /tmp/merged.txt
+mv /tmp/merged.txt signatures/compromised-packages.txt
+
+./tools/make-package-signatures.sh signatures/compromised-packages.txt \
+  > signatures/shai-hulud-2026-08-packages.conf
+
+./tests/run-tests.sh
+```
+
+`merge-package-list.sh` accepts a Socket-style CSV or a plain `name@version` list, and
+**unions** rather than replaces. That is not politeness — as of 2026-08-04 both the Wiz
+CSV and Socket's CSV omit the entire `@keyv/*` scope, which only JFrog published, so
+overwriting from a single feed would silently delete 19 confirmed packages. The tool
+reports how many already-known pairs a feed lacks so you can see this happening.
+
+`make-package-signatures.sh` validates every record and rejects the file rather than
+emitting a malformed one, because a bad record fails every scan closed with exit `1`. IDs
+are derived from a hash of `name@version`, so a longer input never renumbers existing
+entries — they end up in incident tickets.
+
+Neither tool makes network calls; fetch the feed separately so the repository stays usable
+on an air-gapped host.

@@ -12,10 +12,12 @@
   dimensions — and all 16 packages it names are covered, including the five
   community-spread ones outside the keyv/cacheable namespaces (`@deliveroo/reevent`,
   `@or-sdk/invitations`, `@picsart/ai-sdk`, `@qlik/embed-runtime`, `picasso.js`).
-  Remaining avenues: Socket's real-time campaign page (HTTP 403 to scripted fetches,
-  needs a browser session), and re-querying OSV.dev, which held no advisories for this
-  campaign at all when checked. Both source lists were labelled "Ongoing" at collection,
-  so a re-pull is warranted regardless.
+  Socket's machine-readable feed has since been located and cross-checked
+  (`https://socket.dev/api/public/supply-chain-attacks/keyv-and-cacheable-compromise/packages.csv`)
+  — 2,236 pairs, a strict subset of ours, contributing nothing new. Refresh with
+  `tools/merge-package-list.sh`; see `docs/signatures.md`. Remaining avenue: re-query
+  OSV.dev, which held no advisories for this campaign at all when checked. All source
+  lists were labelled "Ongoing" at collection, so a periodic re-pull is warranted.
 - **No npm cache tarball inspection.** A malicious tarball sitting in `~/.npm/_cacache`
   is not detected unless it has been extracted. Worth adding as a `SUSPECT` check.
 - **The Windows port has only been exercised via PowerShell 7 on macOS.** The logic is

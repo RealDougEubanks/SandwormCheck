@@ -12,6 +12,10 @@
 #
 # See docs/spec.md for the design contract and docs/usage.md for examples.
 #
+# Indicator content is not original research: it is assembled from public work by
+# Wiz, Socket, JFrog, CyberKendra, and Aikido. Credits and per-indicator
+# provenance are in docs/references.md.
+#
 # POSIX sh only: no arrays, no [[ ]], no local, no process substitution.
 
 # zsh does not field-split unquoted parameter expansions, which silently breaks

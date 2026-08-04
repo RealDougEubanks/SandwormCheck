@@ -15,6 +15,10 @@
     Reads the same signature/*.conf files as sandwormcheck.sh and implements the
     same check types with the same semantics. See docs/spec.md.
 
+    Indicator content is not original research: it is assembled from public work
+    by Wiz, Socket, JFrog, CyberKendra, and Aikido. Credits and per-indicator
+    provenance are in docs/references.md.
+
     Requires PowerShell 5.1 (shipped with Windows 10/11) or PowerShell 7+.
     No external modules.
 

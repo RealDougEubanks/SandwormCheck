@@ -108,8 +108,13 @@ cat <<EOF
 #!campaign  $CAMPAIGN
 #!version   $SIGVERSION
 #!updated   $(date -u '+%Y-%m-%d')
+# Indicator sources. This list is a UNION of these feeds -- no single one is
+# complete. Credit and per-source detail: docs/references.md
 #!reference https://github.com/wiz-sec-public/wiz-research-iocs/blob/main/reports/keyv-packages.csv
 #!reference https://research.jfrog.com/post/shai-hulud-is-back-august/
+#!reference https://socket.dev/api/public/supply-chain-attacks/keyv-and-cacheable-compromise/packages.csv
+#!reference https://www.wiz.io/blog/keyv-and-cacheable-npm-supply-chain-attack
+#!reference https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
 #
 # $TOTAL name@version pairs across $NAMES distinct package names.
 #

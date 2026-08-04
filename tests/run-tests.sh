@@ -1,5 +1,5 @@
 #!/bin/sh
-# BunWormCheck test suite. POSIX sh, no external test framework.
+# SandwormCheck test suite. POSIX sh, no external test framework.
 #
 #   ./tests/run-tests.sh              run against /bin/sh
 #   SHELLS="sh bash dash zsh" ./tests/run-tests.sh   run against several shells
@@ -10,7 +10,7 @@ set -u
 
 TESTDIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$TESTDIR")
-SCANNER="$ROOT/bunwormcheck.sh"
+SCANNER="$ROOT/sandwormcheck.sh"
 SIGS="$ROOT/signatures"
 FIX="$TESTDIR/fixtures"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/bwc-tests.XXXXXX")
@@ -115,7 +115,7 @@ test_check_types() {
 	# Hash checks use a generated signature file so no real malware is needed.
 	_hashfix="$TMP/hashfix/proj/node_modules/pkg"
 	mkdir -p "$_hashfix"
-	printf 'inert bunwormcheck hash fixture\n' >"$_hashfix/Math_Symbol.js"
+	printf 'inert sandwormcheck hash fixture\n' >"$_hashfix/Math_Symbol.js"
 	_s256=$(hash_of 256 "$_hashfix/Math_Symbol.js")
 	_s1=$(hash_of 1 "$_hashfix/Math_Symbol.js")
 	if [ -n "$_s256" ] && [ -n "$_s1" ]; then
@@ -226,7 +226,7 @@ test_argument_validation() {
 	run 0 "--help exits 0" --help
 	expect_out "Usage:" "--help prints usage"
 	run 0 "--version exits 0" --version
-	expect_out "bunwormcheck" "--version prints the program name"
+	expect_out "sandwormcheck" "--version prints the program name"
 
 	# Bounds at their documented limits must be accepted.
 	run 0 "--max-depth 1 is accepted" --max-depth 1 --path "$FIX/clean" --signatures "$SIGS"
@@ -332,7 +332,7 @@ test_no_network() {
 		no "sh scanner contains no network client invocations" "$_hits"
 	fi
 
-	_ps="$ROOT/BunWormCheck.ps1"
+	_ps="$ROOT/SandwormCheck.ps1"
 	if [ -f "$_ps" ]; then
 		_hits=$(grep -niE '(Invoke-WebRequest|Invoke-RestMethod|System\.Net\.WebClient|DownloadString|DownloadFile|Net\.Sockets|Test-Connection|New-Object[[:space:]]+Net)' \
 			"$_ps" 2>/dev/null | grep -v ':[[:space:]]*#' || :)
@@ -363,7 +363,7 @@ test_readonly() {
 	mkdir -p "$TMP/tmpdir-clean" "$TMP/tmpdir-err"
 	TMPDIR="$TMP/tmpdir-clean" "$CURRENT_SHELL" "$SCANNER" \
 		--path "$FIX/confirmed" --signatures "$SIGS" >/dev/null 2>&1 || :
-	_leaked=$(find "$TMP/tmpdir-clean" -maxdepth 1 -name 'bunwormcheck.*' 2>/dev/null | wc -l | tr -d ' ')
+	_leaked=$(find "$TMP/tmpdir-clean" -maxdepth 1 -name 'sandwormcheck.*' 2>/dev/null | wc -l | tr -d ' ')
 	if [ "$_leaked" -eq 0 ]; then
 		ok "no temporary directory is leaked on a normal exit"
 	else
@@ -373,7 +373,7 @@ test_readonly() {
 	printf '#!campaign t\nBOGUS|CONFIRMED|X-1|foo|desc\n' >"$TMP/leak-bad.conf"
 	TMPDIR="$TMP/tmpdir-err" "$CURRENT_SHELL" "$SCANNER" \
 		--path "$FIX/clean" --signatures "$TMP/leak-bad.conf" >/dev/null 2>&1 || :
-	_leaked=$(find "$TMP/tmpdir-err" -maxdepth 1 -name 'bunwormcheck.*' 2>/dev/null | wc -l | tr -d ' ')
+	_leaked=$(find "$TMP/tmpdir-err" -maxdepth 1 -name 'sandwormcheck.*' 2>/dev/null | wc -l | tr -d ' ')
 	if [ "$_leaked" -eq 0 ]; then
 		ok "no temporary directory is leaked on an error exit"
 	else
@@ -454,9 +454,9 @@ EOF
 test_powershell_parity() {
 	section "PowerShell port parity"
 
-	_ps="$ROOT/BunWormCheck.ps1"
+	_ps="$ROOT/SandwormCheck.ps1"
 	if [ ! -f "$_ps" ]; then
-		printf '  skip (BunWormCheck.ps1 not present)\n'
+		printf '  skip (SandwormCheck.ps1 not present)\n'
 		return 0
 	fi
 	if ! command -v pwsh >/dev/null 2>&1; then
@@ -504,7 +504,7 @@ test_powershell_parity() {
 
 	pscan 20 "ps1: -Json preserves the exit code" -Path "$FIX/confirmed" -SignaturePath "$SIGS" -Json
 	if command -v python3 >/dev/null 2>&1; then
-		python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["verdict"]=="CONFIRMED"; assert d["exit_code"]==20; assert d["schema"]=="bunwormcheck/v1"' \
+		python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["verdict"]=="CONFIRMED"; assert d["exit_code"]==20; assert d["schema"]=="sandwormcheck/v1"' \
 			"$TMP/out" 2>/dev/null
 		check $? "ps1: -Json emits the v1 schema with a matching verdict" "$(head -c 200 "$TMP/out")"
 	fi
@@ -557,7 +557,7 @@ hash_of() {
 	exit 1
 }
 
-printf 'BunWormCheck test suite\n'
+printf 'SandwormCheck test suite\n'
 printf 'scanner: %s\n' "$SCANNER"
 
 for sh_bin in ${SHELLS:-sh}; do

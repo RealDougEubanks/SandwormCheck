@@ -38,7 +38,7 @@ Source material for the indicators in `signatures/shai-hulud-2026-08.conf`.
 
 ## Cross-checks worth running alongside this scanner
 
-BunWormCheck reads the filesystem only. It cannot see what your registry saw. Pair it
+SandwormCheck reads the filesystem only. It cannot see what your registry saw. Pair it
 with:
 
 - `npm audit signatures` and your registry's own audit log.

@@ -133,7 +133,7 @@ is not relied on for security.
 ---
 
 **Assumption:** The scanner re-execs itself under `/bin/sh` when invoked as
-`zsh bunwormcheck.sh`, and refuses to run if no POSIX `sh` exists.
+`zsh sandwormcheck.sh`, and refuses to run if no POSIX `sh` exists.
 **Why:** zsh does not field-split unquoted parameter expansions, which caused eleven
 checks to silently under-report during testing. Under-reporting produces a false clean —
 the failure mode this tool must never have. A hard re-exec is preferable to either a
@@ -155,9 +155,9 @@ codes or fleet triage becomes platform-dependent.
 
 **Assumption:** The Golden Rules sections on caching/CDN, health check endpoints, API
 versioning, and pagination are not applicable and are not implemented.
-**Why:** BunWormCheck is a single-shot local CLI. It exposes no HTTP surface, serves no
+**Why:** SandwormCheck is a single-shot local CLI. It exposes no HTTP surface, serves no
 requests, and has no deployable service to health-check. The `--json` output is
-schema-versioned (`bunwormcheck/v1`), which is the applicable form of the API-versioning
+schema-versioned (`sandwormcheck/v1`), which is the applicable form of the API-versioning
 rule.
 **Recorded by:** Claude
 **Date:** 2026-08-04

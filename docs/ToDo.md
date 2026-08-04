@@ -12,7 +12,7 @@
   would close this.
 - **No npm cache tarball inspection.** A malicious tarball sitting in `~/.npm/_cacache`
   is not detected unless it has been extracted. Worth adding as a `SUSPECT` check.
-- **PSScriptAnalyzer has not been run** against `BunWormCheck.ps1` — it was not available
+- **PSScriptAnalyzer has not been run** against `SandwormCheck.ps1` — it was not available
   in the development environment. `shellcheck -s sh` is clean for the shell scanner.
 - **The Windows port has only been exercised via PowerShell 7 on macOS.** The logic is
   path-agnostic and the parity tests pass, but it has not run on Windows PowerShell 5.1 on

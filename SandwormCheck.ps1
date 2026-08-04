@@ -12,7 +12,7 @@
         1   scanner error (an incomplete scan is NOT a clean scan)
         2   usage error
 
-    Reads the same signature/*.conf files as bunwormcheck.sh and implements the
+    Reads the same signature/*.conf files as sandwormcheck.sh and implements the
     same check types with the same semantics. See docs/spec.md.
 
     Requires PowerShell 5.1 (shipped with Windows 10/11) or PowerShell 7+.
@@ -42,11 +42,11 @@
     Print only the verdict line.
 
 .EXAMPLE
-    .\BunWormCheck.ps1
+    .\SandwormCheck.ps1
     Scan with defaults and let $LASTEXITCODE carry the verdict.
 
 .EXAMPLE
-    .\BunWormCheck.ps1 -Json | Out-File scan.json
+    .\SandwormCheck.ps1 -Json | Out-File scan.json
     Machine-readable output for a log pipeline.
 #>
 
@@ -104,12 +104,12 @@ function Write-Diag {
 
 function Write-Warn {
     param([string] $Message)
-    [Console]::Error.WriteLine("bunwormcheck: warning: $Message")
+    [Console]::Error.WriteLine("sandwormcheck: warning: $Message")
 }
 
 function Stop-WithError {
     param([int] $Code, [string] $Message)
-    [Console]::Error.WriteLine("bunwormcheck: $Message")
+    [Console]::Error.WriteLine("sandwormcheck: $Message")
     exit $Code
 }
 
@@ -604,7 +604,7 @@ function Write-TextReport {
     $suspect = @($script:Findings | Where-Object { $_.Severity -eq 'SUSPECT' }).Count
 
     if (-not $Quiet) {
-        Write-Output "BunWormCheck $($script:ToolVersion)"
+        Write-Output "SandwormCheck $($script:ToolVersion)"
         Write-Output ("  host      : " + (Get-HostIdentifier))
         Write-Output ("  scanned   : {0} roots, {1} files, {2}s" -f `
                 $Roots.Count, $script:FilesWalked, [int]$script:Stopwatch.Elapsed.TotalSeconds)
@@ -671,7 +671,7 @@ function Write-JsonReport {
     param([string[]] $Roots)
 
     $report = [ordered]@{
-        schema           = 'bunwormcheck/v1'
+        schema           = 'sandwormcheck/v1'
         tool_version     = $script:ToolVersion
         host             = Get-HostIdentifier
         scanned_at       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -709,7 +709,7 @@ function Write-JsonReport {
 # ---------------------------------------------------------------------------
 function Invoke-Main {
     if ($Version) {
-        Write-Output "bunwormcheck $($script:ToolVersion)"
+        Write-Output "sandwormcheck $($script:ToolVersion)"
         exit $EXIT_CLEAN
     }
 
@@ -792,7 +792,7 @@ try {
 } catch {
     # No unhandled exception may escape: an uncaught throw would surface a
     # PowerShell exit code that the fleet console would misread.
-    [Console]::Error.WriteLine("bunwormcheck: unhandled error: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("sandwormcheck: unhandled error: $($_.Exception.Message)")
     [Console]::Error.WriteLine($_.ScriptStackTrace)
     exit $EXIT_ERROR
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# BunWormCheck — host-local IOC scanner for npm supply chain compromise.
+# SandwormCheck — host-local IOC scanner for npm supply chain compromise.
 #
 # Read-only. Makes no network connections. Reports to the local console and
 # communicates its verdict through the exit code:
@@ -16,21 +16,21 @@
 
 # zsh does not field-split unquoted parameter expansions, which silently breaks
 # several checks and would under-report indicators — a false clean, the worst
-# failure mode this tool has. If someone invokes us as `zsh bunwormcheck.sh`,
+# failure mode this tool has. If someone invokes us as `zsh sandwormcheck.sh`,
 # re-exec under a real POSIX shell rather than run degraded.
 # shellcheck disable=SC2296  # ZSH_VERSION is only read when zsh is the interpreter
 if [ -n "${ZSH_VERSION:-}" ]; then
 	if [ -x /bin/sh ]; then
 		BWC_REEXEC=1 exec /bin/sh "$0" "$@"
 	fi
-	printf 'bunwormcheck: refusing to run under zsh (no POSIX /bin/sh found)\n' >&2
+	printf 'sandwormcheck: refusing to run under zsh (no POSIX /bin/sh found)\n' >&2
 	exit 1
 fi
 
 set -eu
 
 VERSION="1.0.0"
-PROGNAME="bunwormcheck"
+PROGNAME="sandwormcheck"
 
 EXIT_CLEAN=0
 EXIT_ERROR=1
@@ -675,7 +675,7 @@ json_escape() {
 report_text() {
 	_v=$(verdict_of)
 	if [ "$QUIET" -eq 0 ]; then
-		printf '%s\n' "BunWormCheck $VERSION"
+		printf '%s\n' "SandwormCheck $VERSION"
 		printf '  host      : %s\n' "$HOSTID"
 		printf '  scanned   : %s roots, %s files, %ss\n' \
 			"$(printf '%s' "$SCAN_PATHS" | awk 'NF' | wc -l | tr -d ' ')" \
@@ -726,7 +726,7 @@ report_text() {
 report_json() {
 	_code=$(exit_code_of)
 	printf '{'
-	printf '"schema":"bunwormcheck/v1",'
+	printf '"schema":"sandwormcheck/v1",'
 	printf '"tool_version":"%s",' "$VERSION"
 	printf '"host":"%s",' "$(json_escape "$HOSTID")"
 	printf '"scanned_at":"%s",' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unknown')"
@@ -778,7 +778,7 @@ main() {
 
 	SCAN_START=$(date +%s 2>/dev/null || printf '0')
 
-	WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/bunwormcheck.XXXXXX") ||
+	WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/sandwormcheck.XXXXXX") ||
 		die "$EXIT_ERROR" "cannot create temporary directory"
 	FINDINGS_FILE="$WORKDIR/findings"
 	CANDIDATES_FILE="$WORKDIR/candidates"

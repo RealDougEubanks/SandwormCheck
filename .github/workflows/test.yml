@@ -28,7 +28,7 @@ jobs:
         run: brew install shellcheck
 
       - name: Lint
-        run: shellcheck -s sh bunwormcheck.sh tests/run-tests.sh
+        run: shellcheck -s sh sandwormcheck.sh tests/run-tests.sh
 
       - name: Test across shells
         run: SHELLS="sh bash dash" ./tests/run-tests.sh
@@ -43,7 +43,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path ./BunWormCheck.ps1 -Severity Error,Warning
+          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1 -Severity Error,Warning
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
 
@@ -57,7 +57,7 @@ jobs:
           )
           $failed = $false
           foreach ($c in $cases) {
-            & ./BunWormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor
+            & ./SandwormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor
             if ($LASTEXITCODE -ne $c.Expect) {
               Write-Host "FAIL $($c.Tree): expected $($c.Expect), got $LASTEXITCODE"
               $failed = $true
@@ -71,17 +71,17 @@ jobs:
         shell: pwsh
         run: |
           "#!campaign t`nBOGUS|CONFIRMED|X-1|foo|desc" | Set-Content bad.conf
-          & ./BunWormCheck.ps1 -Path tests/fixtures/clean -SignaturePath bad.conf
+          & ./SandwormCheck.ps1 -Path tests/fixtures/clean -SignaturePath bad.conf
           if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: expected 1, got $LASTEXITCODE"; exit 1 }
           Write-Host 'ok   malformed signature -> 1'
 
       - name: JSON output is valid and schema-versioned
         shell: pwsh
         run: |
-          $out = & ./BunWormCheck.ps1 -Path tests/fixtures/confirmed -SignaturePath signatures -Json
+          $out = & ./SandwormCheck.ps1 -Path tests/fixtures/confirmed -SignaturePath signatures -Json
           $code = $LASTEXITCODE
           $d = $out | ConvertFrom-Json
-          if ($d.schema -ne 'bunwormcheck/v1') { Write-Host "FAIL: bad schema $($d.schema)"; exit 1 }
+          if ($d.schema -ne 'sandwormcheck/v1') { Write-Host "FAIL: bad schema $($d.schema)"; exit 1 }
           if ($d.verdict -ne 'CONFIRMED') { Write-Host "FAIL: bad verdict $($d.verdict)"; exit 1 }
           if ($d.exit_code -ne $code) { Write-Host "FAIL: exit_code $($d.exit_code) != $code"; exit 1 }
           Write-Host 'ok   JSON schema, verdict, and exit code agree'

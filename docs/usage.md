@@ -17,26 +17,26 @@ hash checks rather than silently passing them.
 Scan the default roots (all user home directories plus common deployment paths):
 
 ```sh
-./bunwormcheck.sh
+./sandwormcheck.sh
 ```
 
 Run as root to reach every user profile:
 
 ```sh
-sudo ./bunwormcheck.sh
+sudo ./sandwormcheck.sh
 ```
 
 Windows, from an elevated prompt:
 
 ```powershell
-.\BunWormCheck.ps1
+.\SandwormCheck.ps1
 ```
 
 ## Reading the result
 
 ```
-$ ./bunwormcheck.sh --path ~/work
-BunWormCheck 1.0.0
+$ ./sandwormcheck.sh --path ~/work
+SandwormCheck 1.0.0
   host      : build-07/4e45e1ed311a
   scanned   : 1 roots, 21874 files, 38s
   campaigns :
@@ -64,7 +64,7 @@ A signature file or a directory of `*.conf` files. Defaults to `signatures/` bes
 script. Pointing at a directory loads every campaign in it:
 
 ```sh
-./bunwormcheck.sh --signatures /opt/ioc/campaigns
+./sandwormcheck.sh --signatures /opt/ioc/campaigns
 ```
 
 ### `-p`, `--path PATH` / `-Path PATH`
@@ -73,11 +73,11 @@ Scan root. Repeatable. Overrides auto-detection entirely — useful for a target
 or a fast CI gate:
 
 ```sh
-./bunwormcheck.sh --path /srv/app --path /home/deploy
+./sandwormcheck.sh --path /srv/app --path /home/deploy
 ```
 
 ```powershell
-.\BunWormCheck.ps1 -Path C:\projects,C:\inetpub
+.\SandwormCheck.ps1 -Path C:\projects,C:\inetpub
 ```
 
 ### `--max-depth N` / `-MaxDepth N`
@@ -101,12 +101,12 @@ an incomplete scan is not a clean scan.
 One JSON object on stdout. Diagnostics stay on stderr, so stdout is always parseable.
 
 ```sh
-./bunwormcheck.sh --json | jq '{host, verdict, n: (.findings | length)}'
+./sandwormcheck.sh --json | jq '{host, verdict, n: (.findings | length)}'
 ```
 
 ```json
 {
-  "schema": "bunwormcheck/v1",
+  "schema": "sandwormcheck/v1",
   "tool_version": "1.0.0",
   "host": "build-07/4e45e1ed311a",
   "scanned_at": "2026-08-04T18:22:41Z",
@@ -132,14 +132,14 @@ One JSON object on stdout. Diagnostics stay on stderr, so stdout is always parse
 ```
 
 The `schema` field is versioned. Anything consuming this output should check it before
-reading fields, so a future `bunwormcheck/v2` does not break your pipeline silently.
+reading fields, so a future `sandwormcheck/v2` does not break your pipeline silently.
 
 ### `-q`, `--quiet` / `-Quiet`
 
 Verdict line only. For when the exit code is what you actually want:
 
 ```sh
-./bunwormcheck.sh --quiet || echo "needs attention"
+./sandwormcheck.sh --quiet || echo "needs attention"
 ```
 
 ### `-v`, `--verbose` / `-Verbose`
@@ -157,14 +157,14 @@ or when `NO_COLOR` is set in the environment, so you rarely need this explicitly
 **Only care whether the host is compromised, not whether a dependency needs bumping:**
 
 ```sh
-./bunwormcheck.sh --quiet
+./sandwormcheck.sh --quiet
 [ $? -eq 20 ] && echo "INCIDENT" || echo "no confirmed compromise"
 ```
 
 **Gate CI on a clean tree:**
 
 ```sh
-./bunwormcheck.sh --path "$CI_PROJECT_DIR" --quiet --timeout 120
+./sandwormcheck.sh --path "$CI_PROJECT_DIR" --quiet --timeout 120
 case $? in
   0)  echo "clean" ;;
   10) echo "compromised dependency version present"; exit 1 ;;
@@ -179,13 +179,13 @@ silent gap.
 **Archive results for later correlation:**
 
 ```sh
-./bunwormcheck.sh --json > "/var/log/bunwormcheck-$(date -u +%Y%m%dT%H%M%SZ).json"
+./sandwormcheck.sh --json > "/var/log/sandwormcheck-$(date -u +%Y%m%dT%H%M%SZ).json"
 ```
 
 **Scan a single project quickly:**
 
 ```sh
-./bunwormcheck.sh --path . --max-depth 8 --timeout 60
+./sandwormcheck.sh --path . --max-depth 8 --timeout 60
 ```
 
 ## Performance
@@ -224,5 +224,5 @@ so — the scanner will not pretend those checks passed.
 
 **"refusing to run under zsh"**
 zsh does not field-split unquoted expansions, which would make the scanner under-report.
-Invoke it as `./bunwormcheck.sh` or `sh bunwormcheck.sh`. If a POSIX `/bin/sh` exists the
+Invoke it as `./sandwormcheck.sh` or `sh sandwormcheck.sh`. If a POSIX `/bin/sh` exists the
 script re-execs itself automatically.

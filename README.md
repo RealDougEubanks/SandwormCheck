@@ -1,4 +1,4 @@
-# BunWormCheck
+# SandwormCheck
 
 A host-local scanner that answers one question: **does this machine show signs of the
 npm supply chain worm that hit the `keyv` and `cacheable` namespaces on 2026-08-04?**
@@ -19,18 +19,18 @@ result code.
 ## Quick start
 
 ```sh
-git clone https://github.com/your-org/BunWormCheck.git
-cd BunWormCheck
-./bunwormcheck.sh
+git clone https://github.com/RealDougEubanks/SandwormCheck.git
+cd SandwormCheck
+./sandwormcheck.sh
 echo "exit code: $?"
 ```
 
 Windows:
 
 ```powershell
-git clone https://github.com/your-org/BunWormCheck.git
-cd BunWormCheck
-.\BunWormCheck.ps1
+git clone https://github.com/RealDougEubanks/SandwormCheck.git
+cd SandwormCheck
+.\SandwormCheck.ps1
 "exit code: $LASTEXITCODE"
 ```
 
@@ -85,7 +85,7 @@ found.
 ## Usage
 
 ```
-./bunwormcheck.sh [options]
+./sandwormcheck.sh [options]
 
   -s, --signatures PATH   Signature file or directory (default: ./signatures)
   -p, --path PATH         Scan root; repeatable (default: auto-detected)

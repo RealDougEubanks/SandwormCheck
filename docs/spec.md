@@ -1,4 +1,4 @@
-# BunWormCheck — Specification
+# SandwormCheck — Specification
 
 Version: 1.0.0
 Status: accepted
@@ -6,7 +6,7 @@ Last updated: 2026-08-04
 
 ## 1. Purpose
 
-BunWormCheck is a host-local indicator-of-compromise scanner for the npm supply chain
+SandwormCheck is a host-local indicator-of-compromise scanner for the npm supply chain
 worm that hit the `keyv` and `cacheable` namespaces on 2026-08-04 (self-identified in
 its exfiltration artifacts as `Shai-Hulud: Here We Go Again`).
 
@@ -16,7 +16,7 @@ code so a fleet management tool can triage thousands of results without parsing 
 
 ### Non-goals
 
-BunWormCheck does not:
+SandwormCheck does not:
 
 - Remediate, quarantine, delete, or modify anything. It is strictly read-only.
 - Contact any network service. No C2, no telemetry, no signature auto-update, no
@@ -60,7 +60,7 @@ signatures/*.conf      ← campaign IOC data (pipe-delimited, no code)
         │
         ├──────────────┬───────────────────┐
         ▼              ▼                   ▼
- bunwormcheck.sh   BunWormCheck.ps1    tests/run-tests.sh
+ sandwormcheck.sh   SandwormCheck.ps1    tests/run-tests.sh
  (macOS, Linux)      (Windows)          (fixtures)
         │              │
         └──────┬───────┘
@@ -228,9 +228,9 @@ a scan that could not read `/Users/alice` must say so rather than imply alice is
 
 ## 11. Compatibility
 
-- `bunwormcheck.sh`: POSIX `sh`. Tested against `bash` 3.2 (macOS system shell),
+- `sandwormcheck.sh`: POSIX `sh`. Tested against `bash` 3.2 (macOS system shell),
   `dash`, and `zsh`. No bashisms, no `mapfile`, no `[[`, no arrays.
-- `BunWormCheck.ps1`: PowerShell 5.1 (shipped with Windows 10/11) and PowerShell 7+.
+- `SandwormCheck.ps1`: PowerShell 5.1 (shipped with Windows 10/11) and PowerShell 7+.
   No external modules.
 - External commands used, all in POSIX or base OS: `find`, `grep`, `sed`, `awk`, `od`,
   plus one of `shasum`/`sha256sum`/`openssl` for hashing (probed at startup; absence

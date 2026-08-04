@@ -27,24 +27,24 @@ Command type **Mac** / **Linux**, run as `root`.
 
 ```sh
 #!/bin/sh
-# BunWormCheck — npm supply chain compromise scan
+# SandwormCheck — npm supply chain compromise scan
 # Exit: 0 clean | 10 suspect | 20 CONFIRMED | 1 scanner error | 2 usage error
 set -u
 
-REPO="https://github.com/your-org/BunWormCheck.git"
-DEST="/opt/bunwormcheck"
+REPO="https://github.com/RealDougEubanks/SandwormCheck.git"
+DEST="/opt/sandwormcheck"
 
 if [ -d "$DEST/.git" ]; then
     git -C "$DEST" fetch --quiet origin && git -C "$DEST" reset --hard --quiet origin/main
 else
     rm -rf "$DEST"
     git clone --depth 1 --quiet "$REPO" "$DEST" || {
-        echo "bunwormcheck: could not fetch the scanner" >&2
+        echo "sandwormcheck: could not fetch the scanner" >&2
         exit 1
     }
 fi
 
-sh "$DEST/bunwormcheck.sh" --timeout 600
+sh "$DEST/sandwormcheck.sh" --timeout 600
 ```
 
 If your fleet has no outbound git access, drop the repo into your golden image or push it
@@ -55,12 +55,12 @@ with a JumpCloud file distribution policy and reduce the command to the final li
 Command type **Windows**, which runs as SYSTEM in PowerShell.
 
 ```powershell
-# BunWormCheck — npm supply chain compromise scan
+# SandwormCheck — npm supply chain compromise scan
 # Exit: 0 clean | 10 suspect | 20 CONFIRMED | 1 scanner error | 2 usage error
 $ErrorActionPreference = 'Stop'
 
-$repo = 'https://github.com/your-org/BunWormCheck.git'
-$dest = 'C:\ProgramData\BunWormCheck'
+$repo = 'https://github.com/RealDougEubanks/SandwormCheck.git'
+$dest = 'C:\ProgramData\SandwormCheck'
 
 try {
     if (Test-Path (Join-Path $dest '.git')) {
@@ -71,12 +71,12 @@ try {
         git clone --depth 1 --quiet $repo $dest
     }
 } catch {
-    [Console]::Error.WriteLine("bunwormcheck: could not fetch the scanner: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("sandwormcheck: could not fetch the scanner: $($_.Exception.Message)")
     exit 1
 }
 
 & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-    -File (Join-Path $dest 'BunWormCheck.ps1') -TimeoutSeconds 600
+    -File (Join-Path $dest 'SandwormCheck.ps1') -TimeoutSeconds 600
 exit $LASTEXITCODE
 ```
 
@@ -91,10 +91,10 @@ code:
 ```sh
 #!/bin/sh
 set -u
-OUT="/var/log/bunwormcheck/$(date -u +%Y%m%dT%H%M%SZ).json"
+OUT="/var/log/sandwormcheck/$(date -u +%Y%m%dT%H%M%SZ).json"
 mkdir -p "$(dirname "$OUT")"
 
-sh /opt/bunwormcheck/bunwormcheck.sh --json --timeout 600 > "$OUT"
+sh /opt/sandwormcheck/sandwormcheck.sh --json --timeout 600 > "$OUT"
 CODE=$?
 
 # Echo it so it also lands in the JumpCloud command result.
@@ -124,7 +124,7 @@ scanner itself never fetches anything.
 ```yaml
 - name: Scan for npm worm indicators
   ansible.builtin.command:
-    cmd: sh /opt/bunwormcheck/bunwormcheck.sh --json --timeout 600
+    cmd: sh /opt/sandwormcheck/sandwormcheck.sh --json --timeout 600
   register: bwc
   changed_when: false
   failed_when: bwc.rc not in [0, 10, 20]
@@ -146,7 +146,7 @@ a known path if you want the detail.
 
 ```sh
 while read -r host; do
-    ssh "$host" 'sh /opt/bunwormcheck/bunwormcheck.sh --quiet --timeout 600'
+    ssh "$host" 'sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 600'
     printf '%s\t%s\n' "$host" "$?"
 done < hosts.txt | tee results.tsv
 
@@ -161,7 +161,7 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 **cron**
 
 ```cron
-17 4 * * * /bin/sh /opt/bunwormcheck/bunwormcheck.sh --quiet --timeout 900 || logger -t bunwormcheck -p auth.warning "scan returned $?"
+17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 900 || logger -t sandwormcheck -p auth.warning "scan returned $?"
 ```
 
 ## Operational notes

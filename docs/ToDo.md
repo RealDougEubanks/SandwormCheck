@@ -93,14 +93,16 @@ just not by its manifest. Stated in the README rather than left implicit.
 
 ## Known false-positive sources
 
-- **Documentation about the campaign matches the campaign.** `CONTENT` signatures look for
-  distinctive strings, and those appear in vendor advisories, IOC feeds, incident tickets,
-  and this repository. A host storing any of that produces content matches. The tool's own
-  directory and signature files are excluded automatically, and snapshot stores
-  (`file-history`, `.history`) are pruned, but a saved advisory in `~/Documents` will still
-  match. Corroborate content-only hits before paging anyone; `--exclude` covers known
-  locations. A deeper fix would be to require corroboration before a content-only match is
-  reported as `CONFIRMED`.
+- **Payload filenames can collide with legitimate packages.** Fixed for `Math_Symbol.js`
+  (position plus a size floor) after a live false positive, but the class remains: any
+  filename signature can collide. Mitigation is procedural — check the registry before
+  adding one, and add a size floor where the artifact has a characteristic size.
+- **Documentation about the campaign matches the campaign.** Largely addressed: every
+  `CONTENT` signature now carries a path scope, so transcripts, shell history, notes, saved
+  advisories, and the scanner's own `--json` report no longer match. The residual is a
+  **code** file deliberately containing a marker string — someone pasting a payload sample
+  into `notes.js` is still flagged. A deeper fix would require corroboration before a
+  content-only match is reported as `CONFIRMED`.
 - **A second checkout of this repository is not auto-excluded.** Only the running install
   is. Detecting "a SandwormCheck checkout" anywhere on disk would be trivially spoofable
   into an arbitrary blind spot, so it is deliberately left to `--exclude`.

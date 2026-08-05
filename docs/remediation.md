@@ -16,6 +16,23 @@ crypto wallets, then exfiltrated to attacker-controlled GitHub repositories. The
 npm token republishes the maintainer's entire package portfolio, so one developer laptop
 can become a supply chain incident for your customers.
 
+### 0. Verify the finding first
+
+A `20` is a reason to look, not proof by itself. Before isolating a host:
+
+- **Check the size** of any payload-filename finding. The payload is ~728 KB; a file of a
+  few KB is a data file. `Math_Symbol.js` in particular is also a legitimate Unicode data
+  file shipped by `regenerate-unicode-properties`, a Babel dependency present in most JS
+  projects.
+- **Check the position.** The payload sits at a package root, not nested under a data
+  directory.
+- **Look for corroboration.** A content-only match on a campaign string can be a saved
+  advisory or an incident note. A payload plus a matching hash plus a persistence artifact
+  is a compromise.
+
+If those checks hold up, continue. If a single content match on a documentation file is all
+there is, treat it as a false positive and report it — see CONTRIBUTING.md.
+
 ### 1. Contain
 
 - Isolate the host from the network. Do not shut it down if you intend to collect

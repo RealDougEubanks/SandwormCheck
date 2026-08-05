@@ -535,3 +535,83 @@ working install in place rather than destroying it. TLS 1.2 is forced explicitly
 Windows PowerShell 5.1 does not negotiate it by default.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** `PATHGLOB` implements real glob semantics (`*` within one segment, `**`
+across) and both `PATHGLOB` and `FILENAME` accept an optional `>=<bytes> ` size floor.
+**Why:** A live fleet scan returned five `CONFIRMED` findings on a host nobody had touched in
+months, all on `node_modules/regenerate-unicode-properties/General_Category/Math_Symbol.js`
+— a legitimate 1 KB Unicode codepoint list. `Math_Symbol` is the real Unicode category `Sm`,
+and the package is a transitive dependency of `@babel/plugin-transform-*`, so it is present
+in a large share of all JavaScript projects. The report told the operator to isolate the host
+and rotate every credential.
+
+Expanding `*` to `.*` meant a glob could not express "directly inside a package directory",
+which is the discriminator that separates the payload's drop location from the Unicode
+file's. Real glob semantics plus a size floor give two independent discriminators, either
+sufficient alone: the payload is ~728 KB, the data file ~1 KB.
+
+This is the same mistake as the removed `SH25-R004` (`CONTENT|setup.mjs`) — a name too
+common to be evidence — repeated at `CONFIRMED` severity on a filename that looked
+distinctive. The worm most likely chose `Math_Symbol.js` *because* it blends into Babel
+dependency trees. Signature authoring now requires checking whether a filename exists in the
+registry before trusting it.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `.claude/projects` is pruned alongside `file-history` and `.history`.
+**Why:** Claude Code session transcripts are JSONL files containing whatever was discussed,
+so a session about this campaign reproduces every marker string the scanner looks for. Two
+of the seven findings in the same fleet report were transcripts. Pruning `file-history`
+alone was not enough.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Committed payload fixtures are small placeholders, padded past the size
+floor by the test harness.
+**Why:** Keeping a real-sized payload fixture in the repository would add megabytes and
+place something resembling a payload under version control. But the previous fixtures were a
+single line, which the size floor correctly rejected — meaning they had never represented
+something the scanner would detect on a real host. Padding in the copy keeps the repository
+small while exercising the real threshold.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Every shipped `CONTENT` signature carries a path scope, and the check type
+supports one.
+**Why:** A live fleet report contained two `CONFIRMED` findings on
+`~/.claude/projects/*.jsonl` — an assistant transcript from a user asking whether they were
+infected. The act of investigating produced the evidence. Testing the class showed it was
+far broader than transcripts: shell history, incident notes, a saved advisory, and **the
+scanner's own `--json` report** were all reported as a confirmed compromise. The last is the
+worst, because the documentation instructs operators to write that report to disk, so the
+tool manufactured evidence against itself on the next run.
+
+Pruning `.claude/projects` would have fixed one symptom and left the class intact. Scoping
+addresses the cause: a string match cannot tell an infection from a description of one, so
+the signature must say where the artifact would actually live. The shipped descriptions
+already claimed a scope — "in a config or unit file", "inside an IDE config or package
+manifest" — and the implementation ignored it.
+
+Accepted residual: a code file that deliberately contains a marker string still matches.
+That is a far narrower surface than every file on disk, and it is documented.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The payload fixture embeds the marker strings inside the bundle rather than
+in a loose `marker.txt`.
+**Why:** Scoping `SH25-M001` to code files correctly stopped matching `marker.txt`, which
+revealed the fixture was never realistic. Wiz reports that string as the exfiltration
+repository *description*; on disk it appears inside the payload bundle. A fixture that only
+passes because a check is over-broad is not evidence the check works.
+**Recorded by:** Claude
+**Date:** 2026-08-05

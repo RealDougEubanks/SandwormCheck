@@ -18,20 +18,37 @@ result code.
 
 ## Quick start
 
+**macOS / Linux** — run as root so it can read every user's home directory:
+
 ```sh
 git clone https://github.com/RealDougEubanks/SandwormCheck.git
 cd SandwormCheck
-./sandwormcheck.sh
+sudo ./sandwormcheck.sh
 echo "exit code: $?"
 ```
 
-Windows:
+**Windows** — run as Administrator:
 
 ```powershell
 git clone https://github.com/RealDougEubanks/SandwormCheck.git
 cd SandwormCheck
 .\SandwormCheck.ps1
 "exit code: $LASTEXITCODE"
+```
+
+No git? Use the self-updating runner below — it falls back to a zip download.
+
+**Scan one project instead of the whole machine** (seconds rather than minutes):
+
+```sh
+./sandwormcheck.sh --path ~/code/my-project
+```
+
+**Machine-readable output**, for a log pipeline:
+
+```sh
+sudo ./sandwormcheck.sh --json --timeout 1200 > scan.json
+echo "exit code: $?"
 ```
 
 With no arguments it scans every user's home directory plus common deployment paths. Run it
@@ -136,16 +153,24 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
 ./sandwormcheck.sh [options]
 
   -s, --signatures PATH   Signature file or directory (default: ./signatures)
-  -p, --path PATH         Scan root; repeatable (default: auto-detected)
+  -p, --path PATH         Scan root; repeatable (default: every user home plus
+                          /opt, /srv, /var/www, /usr/local/lib/node_modules)
+  -x, --exclude PATH      Do not scan under PATH; repeatable. The scanner's own
+                          directory and signature files are always excluded.
       --max-depth N       Directory depth limit (1-64, default 12)
       --max-file-size N   Skip larger files for hash/content checks (default 8 MiB)
-      --timeout N         Wall-clock limit in seconds (10-86400, default 900)
+      --timeout N         Wall-clock limit for the whole scan (10-86400, default 1800)
       --json              Emit one JSON object instead of text
   -q, --quiet             Print only the verdict line
-  -v, --verbose           Progress to stderr
+  -v, --verbose           Progress with elapsed seconds per stage, to stderr
       --no-color          Disable ANSI color
   -h, --help              Full help
+      --version           Print version
 ```
+
+The PowerShell port takes the same options in PowerShell form: `-SignaturePath`, `-Path`,
+`-Exclude`, `-MaxDepth`, `-MaxFileSize`, `-TimeoutSeconds`, `-Json`, `-Quiet`, `-Verbose`,
+`-NoColor`, `-Version`.
 
 More examples, including JSON output and CI use, are in [docs/usage.md](docs/usage.md).
 

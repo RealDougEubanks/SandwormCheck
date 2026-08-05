@@ -104,12 +104,12 @@ CHECK_TYPE|SEVERITY|ID|PATTERN|DESCRIPTION
 | Type | `PATTERN` semantics | Notes |
 |---|---|---|
 | `PATHEXISTS` | Absolute path, `~` expanded, shell glob allowed | Persistence artifacts |
-| `FILENAME` | Exact basename, matched anywhere under a scan root | Dropped payloads |
-| `PATHGLOB` | Glob matched against the full discovered path | Filenames too common to match on basename alone |
+| `FILENAME` | Exact basename, matched anywhere under a scan root. Optional `>=<bytes> ` size floor | Dropped payloads |
+| `PATHGLOB` | Glob against the full path; `*` stays within one segment, `**` crosses. Optional `>=<bytes> ` size floor | Filenames too common to match on basename alone |
 | `SHA256` | 64 hex chars, compared against candidate files | Highest confidence |
 | `SHA1` | 40 hex chars | Some vendors published SHA-1 only |
 | `PKGVER` | `name@version`, exact match against `package.json` **and lockfiles** | Vulnerable-version detection |
-| `CONTENT` | Literal substring, searched in bounded candidate files | Strings, domains, markers |
+| `CONTENT` | Literal substring in bounded candidate files, with an optional `[glob,glob] ` path scope | Strings, domains, markers |
 | `PROCESS` | Literal substring, searched in running process command lines | Live implant whose files are gone |
 
 Rejected as out of scope for v1: regex content matching (portability of regex dialects
@@ -118,7 +118,58 @@ between `grep` and .NET is a correctness trap), and version *ranges* for `PKGVER
 discrete bad versions, so enumerate them). Note this means a lockfile *range spec*
 such as `"keyv": "^6.0.0"` is not matched; only the resolved version is.
 
-### 4.2 Process coverage
+### 4.2 Investigating the campaign must not look like the campaign
+
+A string match cannot distinguish an infection from a description of one. Everything that
+records an investigation ends up holding every marker string the scanner looks for:
+
+| Artifact | Why it matches |
+|---|---|
+| `~/.claude/projects/*.jsonl` | a user asked an assistant whether they were infected |
+| shell history, terminal logs | the investigator grepped for the filenames |
+| incident notes, tickets, saved advisories | they quote the IOCs |
+| **this scanner's own `--json` report** | findings embed the descriptions and domains |
+
+All of these were reported as `CONFIRMED COMPROMISE` on real hosts. The last is the sharpest:
+the documentation tells operators to save `--json` output, and the next scan then flags that
+file — the tool manufacturing evidence of its own compromise.
+
+`CONTENT` signatures therefore take an optional path scope, `[glob,glob] pattern`, and every
+shipped one uses it. The scopes match where the artifact actually lives: IDE configs,
+package manifests, launchd/systemd units, shell rc files, and code. A `.jsonl` transcript, a
+`.log`, a `.md`, or a stray `.json` report is not where a payload lives.
+
+The signature *descriptions* already said this — "in a config or unit file", "inside an IDE
+config or package manifest". The implementation ignored it. Where a description states a
+scope, the pattern must now encode it.
+
+Residual: a code file deliberately containing a marker string still matches. That is a much
+narrower surface than every file on disk, and it is documented rather than hidden.
+
+### 4.3 Filename collisions with legitimate packages
+
+A payload filename is not automatically distinctive. The worm's ~728 KB Bun bundle is named
+`Math_Symbol.js`, and `regenerate-unicode-properties` ships a legitimate 1 KB Unicode
+codepoint list at `General_Category/Math_Symbol.js`. `Math_Symbol` is the real Unicode
+category `Sm`, and that package is a transitive dependency of `@babel/plugin-transform-*`,
+so it appears in a large share of all JavaScript projects. Matching the basename at
+`CONFIRMED` produced five findings on an untouched host and instructed the operator to
+isolate it and rotate every credential.
+
+Two independent discriminators are used, and either alone would have prevented it:
+
+1. **Position.** The loader writes the payload at a package *root*
+   (`node_modules/keyv/Math_Symbol.js`); the Unicode file sits one level deeper under
+   `General_Category/`. Expressing that requires `*` not to cross a separator, which is why
+   `PATHGLOB` has real glob semantics rather than treating `*` as "any characters".
+2. **Size.** A `>=<bytes> ` prefix on the pattern requires a minimum file size. 728 KB
+   versus 1 KB is not a close call.
+
+The general rule for signature authoring: before adding a filename signature, check whether
+the name exists in the registry. A name that looks distinctive may have been chosen
+*because* it blends into common dependency trees.
+
+### 4.4 Process coverage
 
 Filesystem checks alone leave a false-clean hole: this campaign's dead-man's switch
 polls GitHub every 60 seconds, and the payload has a 24-hour TTL self-destruct, so
@@ -160,7 +211,7 @@ is *loaded* (as opposed to its file existing), the `loginctl enable-linger` mark
 and the npm cache. A `launchctl`/`systemctl` query would catch a unit that is
 registered while its plist has been deleted.
 
-### 4.3 Lockfile coverage
+### 4.5 Lockfile coverage
 
 `PKGVER` matches two independent sources:
 
@@ -221,7 +272,7 @@ git, `file:`, `link:`, and `workspace:` dependencies; yarn berry `patch:`
 resolutions, which are percent-encoded; pnpm and bun alias forms; and npm entries
 that carry no `resolved` field.
 
-### 4.4 Severity
+### 4.6 Severity
 
 - `CONFIRMED` — the artifact has no benign explanation. Payload files, matching
   hashes, host persistence units, exfil markers.

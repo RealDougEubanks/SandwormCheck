@@ -581,6 +581,14 @@ load_signatures() {
 					if (pat !~ /^[0-9a-fA-F]{40}$/)
 						fail(FNR, id ": SHA1 must be 40 hex characters, got " length(pat))
 					pat = tolower(pat)
+				} else if (type == "CONTENT") {
+					# An optional "[glob,glob] " scope prefix must be closed.
+					if (substr(pat, 1, 1) == "[" && index(pat, "] ") < 2)
+						fail(FNR, id ": CONTENT scope must be \x27[glob,glob] <string>\x27")
+				} else if (type == "PATHGLOB" || type == "FILENAME") {
+					# An optional ">=N " size floor must be well formed if present.
+					if (pat ~ /^>=/ && pat !~ /^>=[0-9]+ ./)
+						fail(FNR, id ": size floor must be \x27>=<bytes> <pattern>\x27")
 				} else if (type == "PKGVER") {
 					if (index(pat, "@") == 0)
 						fail(FNR, id ": PKGVER must be name@version")
@@ -707,7 +715,8 @@ walk() {
 	find -H "$_root" -maxdepth "$MAX_DEPTH" \
 		\( -name .git -o -name .Trash -o -name Caches \
 		-o -name CloudStorage -o -name .npm-cache \
-		-o -name file-history -o -name .history \) -prune -o \
+		-o -name file-history -o -name .history \
+		-o -path '*/.claude/projects' \) -prune -o \
 		-type f -print 2>/dev/null || :
 }
 
@@ -746,42 +755,70 @@ glob_report() {
 }
 
 check_filenames_and_globs() {
-	# One awk pass over the candidate list for both types. The previous form ran
-	# a shell `while read` loop per signature over the whole list, which on a real
-	# tree of a few hundred thousand candidates costs seconds per signature.
+	# One awk pass over the candidate list for both types.
 	[ -s "$CANDIDATES_FILE" ] || return 0
 
 	awk -F'|' '
-		function globToRe(g,   out, i, c) {
-			# Signature globs use only * and ?, so a small translation is enough.
-			out = "^"
-			for (i = 1; i <= length(g); i++) {
+		# Glob semantics: * matches within ONE path segment, ** crosses segments,
+		# and **/ also matches zero segments.
+		#
+		# An earlier version expanded * to .* so it crossed slashes, which made it
+		# impossible to express "directly inside a package directory". That mattered:
+		# Math_Symbol.js is ALSO a legitimate Unicode data file, shipped by
+		# regenerate-unicode-properties at General_Category/Math_Symbol.js. That
+		# package is a transitive dependency of @babel/plugin-transform-*, so it is
+		# present in a large share of all JS projects, and matching on basename
+		# reported those hosts as a confirmed compromise.
+		function globToRe(g,   out, i, c, n) {
+			out = "^"; i = 1; n = length(g)
+			while (i <= n) {
 				c = substr(g, i, 1)
-				if (c == "*") out = out ".*"
-				else if (c == "?") out = out "."
-				else if (c ~ /[.\[\]()+^$\\{}|\/]/) out = out "\\" c
+				if (c == "*") {
+					if (substr(g, i+1, 1) == "*") {
+						if (substr(g, i+2, 1) == "/") { out = out "(.*/)?"; i += 3; continue }
+						out = out ".*"; i += 2; continue
+					}
+					out = out "[^/]*"; i++; continue
+				}
+				if (c == "?") { out = out "[^/]"; i++; continue }
+				if (c ~ /[.[\]()+^$\\{}|]/) out = out "\\" c
 				else out = out c
+				i++
 			}
 			return out "$"
 		}
 		$1=="FILENAME" || $1=="PATHGLOB" {
 			desc=$5
 			for (i=6; i<=NF; i++) desc = desc "|" $i
+			pat = $4
+			minsz = 0
+			# Optional ">=N " size floor. The payload is a ~728 KB Bun bundle and the
+			# legitimate Unicode file of the same name is about 1 KB, so size alone
+			# separates them even where a path check would not.
+			if (match(pat, /^>=[0-9]+ /)) {
+				minsz = substr(pat, 3, RLENGTH - 3) + 0
+				pat = substr(pat, RLENGTH + 1)
+			}
 			n++
-			type[n]=$1; sev[n]=$2; id[n]=$3; pat[n]=$4; d[n]=desc
-			if ($1=="PATHGLOB") re[n] = globToRe($4)
+			type[n]=$1; sev[n]=$2; id[n]=$3; d[n]=desc; msz[n]=minsz; raw[n]=pat
+			if ($1=="PATHGLOB") re[n] = globToRe(pat)
 		}
-		END { for (i=1; i<=n; i++) printf "%s\t%s\t%s\t%s\t%s\t%s\n", type[i], sev[i], id[i], pat[i], d[i], re[i] }
+		END {
+			for (i=1; i<=n; i++)
+				printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", type[i], sev[i], id[i], raw[i], d[i], re[i], msz[i]
+		}
 	' "$WORKDIR/sigs" >"$WORKDIR/fnsigs" 2>/dev/null || :
 	[ -s "$WORKDIR/fnsigs" ] || return 0
 
+	# Candidate hits first; the size floor is applied afterwards so a size is looked
+	# up only for the few paths that actually matched.
 	awk -v sigfile="$WORKDIR/fnsigs" '
 		BEGIN {
 			FS = "\t"
 			while ((getline line < sigfile) > 0) {
 				split(line, f, "\t")
 				n++
-				type[n]=f[1]; sev[n]=f[2]; id[n]=f[3]; pat[n]=f[4]; d[n]=f[5]; re[n]=f[6]
+				type[n]=f[1]; sev[n]=f[2]; id[n]=f[3]; pat[n]=f[4]; d[n]=f[5]; re[n]=f[6]; msz[n]=f[7]+0
 				if (f[1] == "FILENAME") byname[f[4]] = byname[f[4]] n ","
 			}
 			close(sigfile)
@@ -797,16 +834,30 @@ check_filenames_and_globs() {
 				cnt = split(byname[leaf], idx, ",")
 				for (j = 1; j <= cnt; j++) {
 					k = idx[j] + 0
-					if (k) printf "%s|%s|%s|filename match|%s\n", sev[k], id[k], path, d[k]
+					if (k) printf "%s\t%s\t%s\t%s\tfilename match\t%s\n", msz[k], sev[k], id[k], path, d[k]
 				}
 			}
 			for (k = 1; k <= n; k++) {
 				if (type[k] == "PATHGLOB" && path ~ re[k])
-					printf "%s|%s|%s|path glob match|%s\n", sev[k], id[k], path, d[k]
+					printf "%s\t%s\t%s\t%s\tpath glob match\t%s\n", msz[k], sev[k], id[k], path, d[k]
 			}
 		}
-	' "$CANDIDATES_FILE" >>"$FINDINGS_FILE" 2>/dev/null || :
+	' "$CANDIDATES_FILE" >"$WORKDIR/fnhits" 2>/dev/null || :
+	[ -s "$WORKDIR/fnhits" ] || return 0
+
+	while IFS="$(printf '\t')" read -r _min _sev _id _path _detail _desc; do
+		[ -n "$_id" ] || continue
+		if [ "${_min:-0}" -gt 0 ]; then
+			_sz=$(file_size "$_path")
+			if [ "${_sz:-0}" -lt "$_min" ]; then
+				info "size floor: $_path is ${_sz}B, under ${_min}B required by $_id"
+				continue
+			fi
+		fi
+		printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$_path" "$_detail" "$_desc" >>"$FINDINGS_FILE"
+	done <"$WORKDIR/fnhits"
 }
+
 
 check_hashes() {
 	# check_hashes <lowercase_algo> <uppercase_check_type>
@@ -883,37 +934,71 @@ check_hashes() {
 }
 
 check_content() {
-	# One batched grep over many files at a time rather than a grep per pattern
-	# per file. The per-file form costs (patterns + 1) processes for every
-	# candidate, which on a real dependency tree is hundreds of thousands of
-	# processes and takes minutes.
+	# Two stages: a batched grep -l sweep to find candidate files, then -o only on
+	# those to learn which pattern hit. See docs/spec.md.
+	#
+	# A CONTENT pattern may carry a PATH SCOPE: "[glob,glob] pattern" restricts the
+	# match to files whose path matches one of the globs.
+	#
+	# Scope exists because a bare string match cannot tell an infection from a
+	# description of one. Investigating the campaign creates artifacts that contain
+	# every marker string: AI assistant transcripts, shell history, incident notes,
+	# a saved vendor advisory -- and this scanner's own --json report, which the
+	# documentation tells operators to write to disk. All of those were reported as
+	# CONFIRMED COMPROMISE. The signature descriptions already said "in a config or
+	# unit file"; the implementation simply did not honour it.
 	_sigs=$(sigs_of_type CONTENT)
 	[ -n "$_sigs" ] || return 0
 	[ -s "$CONTENTCAND_FILE" ] || return 0
 
-	# Literal patterns for the batched pass, plus a pattern -> signature map.
+	# Literal patterns for the sweep, plus a pattern -> signature+scope map.
 	: >"$WORKDIR/cpat"
 	: >"$WORKDIR/cmap"
-	printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
-		[ -n "$_id" ] || continue
-		printf '%s\n' "$_pat" >>"$WORKDIR/cpat"
-		printf '%s\t%s|%s|%s\n' "$_pat" "$_sev" "$_id" "$_desc" >>"$WORKDIR/cmap"
-	done
+	printf '%s\n' "$_sigs" | awk -F'|' '
+		function globToRe(g,   out, i, c, n) {
+			out = "^"; i = 1; n = length(g)
+			while (i <= n) {
+				c = substr(g, i, 1)
+				if (c == "*") {
+					if (substr(g, i+1, 1) == "*") {
+						if (substr(g, i+2, 1) == "/") { out = out "(.*/)?"; i += 3; continue }
+						out = out ".*"; i += 2; continue
+					}
+					out = out "[^/]*"; i++; continue
+				}
+				if (c == "?") { out = out "[^/]"; i++; continue }
+				if (c ~ /[.[\]()+^$\\{}|]/) out = out "\\" c
+				else out = out c
+				i++
+			}
+			return out "$"
+		}
+		{
+			sev=$2; id=$3; pat=$4
+			desc=$5
+			for (i=6; i<=NF; i++) desc = desc "|" $i
+			scope = ""
+			if (substr(pat, 1, 1) == "[") {
+				close_at = index(pat, "] ")
+				if (close_at > 1) {
+					globs = substr(pat, 2, close_at - 2)
+					pat = substr(pat, close_at + 2)
+					n = split(globs, g, ",")
+					for (j = 1; j <= n; j++) {
+						gsub(/^[ \t]+|[ \t]+$/, "", g[j])
+						if (g[j] == "") continue
+						scope = scope (scope == "" ? "" : "|") "(" globToRe(g[j]) ")"
+					}
+				}
+			}
+			print pat > patfile
+			printf "%s\t%s|%s|%s\t%s\n", pat, sev, id, desc, scope > mapfile
+		}
+	' patfile="$WORKDIR/cpat" mapfile="$WORKDIR/cmap"
 	[ -s "$WORKDIR/cpat" ] || return 0
 
-	# -o with -H gives path:pattern per hit. -a so a binary payload does not
-	# suppress output. xargs batches the file list; -n keeps the argument list
-	# under the platform limit.
-	# Two stages. `grep -l` stops at the first match per file and keeps grep on its
-	# fast fixed-string path, so the broad sweep over every candidate is as cheap
-	# as possible. Only the few files that matched are then re-read with `-o` to
-	# learn which pattern hit, which is the expensive mode.
-	#
-	# NUL-delimited so paths containing spaces survive xargs. -a because a binary
-	# payload must not suppress output.
-	#
-	# Chunked so the time budget is checked as we go. This is the longest stage, so
-	# without a check here --timeout would not bound the scan.
+	# Broad sweep. grep -l stops at the first match per file and keeps grep on its
+	# fast fixed-string path. -a so a binary payload does not suppress output.
 	: >"$WORKDIR/chits"
 	_total=$(wc -l <"$CONTENTCAND_FILE" | tr -d ' ')
 	_off=1
@@ -938,9 +1023,8 @@ check_content() {
 		sort -u |
 		while IFS= read -r line; do
 			[ -n "$line" ] || continue
-			# grep -H output is path:matched-text. A path may itself contain ':',
-			# so split on the LAST occurrence of a known pattern instead: look up
-			# each candidate pattern as a suffix.
+			# grep -H output is path:matched-text. A path may itself contain ':', so
+			# match a known pattern as a suffix instead of splitting on the first ':'.
 			_hitpat=""
 			_path=""
 			while IFS= read -r p; do
@@ -956,12 +1040,20 @@ check_content() {
 			[ -n "$_hitpat" ] || continue
 			_rec=$(awk -F'\t' -v h="$_hitpat" '$1==h {print $2; exit}' "$WORKDIR/cmap")
 			[ -n "$_rec" ] || continue
+			_scope=$(awk -F'\t' -v h="$_hitpat" '$1==h {print $3; exit}' "$WORKDIR/cmap")
+			if [ -n "$_scope" ]; then
+				printf '%s\n' "$_path" | grep -qE -- "$_scope" || {
+					info "out of scope: $_path does not match the scope for ${_rec#*|}"
+					continue
+				}
+			fi
 			_sev=$(printf '%s' "$_rec" | cut -d'|' -f1)
 			_id=$(printf '%s' "$_rec" | cut -d'|' -f2)
 			_desc=$(printf '%s' "$_rec" | cut -d'|' -f3-)
 			printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$_path" "content match" "$_desc" >>"$FINDINGS_FILE"
 		done
 }
+
 
 build_pkgver_lookup() {
 	# name@version -> SEV|ID|DESC, one record per line. Built once so the checks
@@ -1335,7 +1427,7 @@ build_file_lists() {
 	: >"$WORKDIR/namepat"
 	{
 		sigs_of_type FILENAME | cut -d'|' -f4
-		sigs_of_type PATHGLOB | cut -d'|' -f4 | sed 's|.*/||'
+		sigs_of_type PATHGLOB | cut -d'|' -f4 | sed 's|^>=[0-9]* ||' | sed 's|.*/||'
 	} | sort -u | while IFS= read -r n; do
 		[ -n "$n" ] || continue
 		case $n in

@@ -1,0 +1,34 @@
+#!/bin/sh
+# SandwormCheck pre-commit hook.
+#
+# Runs the fast subset of tools/checks.sh against staged files. The full test
+# suite runs on pre-push and in CI, so committing stays quick.
+#
+# Install with: ./tools/install-hooks.sh
+# Bypass with:  git commit --no-verify   (CI will still catch it)
+
+set -u
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+
+[ -f "$ROOT/tools/checks.sh" ] || {
+	printf 'pre-commit: tools/checks.sh not found; skipping checks\n' >&2
+	exit 0
+}
+
+printf 'pre-commit: running staged checks (--no-verify to skip)\n' >&2
+if sh "$ROOT/tools/checks.sh" --staged --quick; then
+	exit 0
+fi
+
+cat >&2 <<'MSG'
+
+pre-commit: checks failed, commit aborted.
+
+Fix the problems above, or bypass deliberately with:
+    git commit --no-verify
+
+Bypassing is fine for a work-in-progress branch; CI enforces the same checks on
+the pull request, so nothing reaches main unchecked.
+MSG
+exit 1

@@ -110,6 +110,7 @@ CHECK_TYPE|SEVERITY|ID|PATTERN|DESCRIPTION
 | `SHA1` | 40 hex chars | Some vendors published SHA-1 only |
 | `PKGVER` | `name@version`, exact match against `package.json` **and lockfiles** | Vulnerable-version detection |
 | `CONTENT` | Literal substring, searched in bounded candidate files | Strings, domains, markers |
+| `PROCESS` | Literal substring, searched in running process command lines | Live implant whose files are gone |
 
 Rejected as out of scope for v1: regex content matching (portability of regex dialects
 between `grep` and .NET is a correctness trap), and version *ranges* for `PKGVER`
@@ -117,7 +118,44 @@ between `grep` and .NET is a correctness trap), and version *ranges* for `PKGVER
 discrete bad versions, so enumerate them). Note this means a lockfile *range spec*
 such as `"keyv": "^6.0.0"` is not matched; only the resolved version is.
 
-### 4.2 Lockfile coverage
+### 4.2 Process coverage
+
+Filesystem checks alone leave a false-clean hole: this campaign's dead-man's switch
+polls GitHub every 60 seconds, and the payload has a 24-hour TTL self-destruct, so
+the process can outlive its own artifacts. A host whose files were partially
+cleaned but whose watcher is still resident would otherwise report `CLEAN`.
+
+`PROCESS` matches a literal substring against the full argument list of every
+running process, with two restrictions:
+
+1. **The scanner's own ancestry is skipped.** Our argv names the signature
+   directory, and the shell that launched us often names the artifacts too.
+2. **Processes whose executable is an inspection tool are skipped** — `grep`,
+   `find`, `vim`, `strings`, `cat`, and similar. Naming a suspicious file is their
+   job. Interpreters are deliberately *not* excluded: the real
+   `gh-token-monitor.sh` is a shell script and appears as
+   `/bin/sh /path/gh-token-monitor.sh`, so skipping shells would miss the exact
+   implant the check exists to find.
+
+Both restrictions were added in response to failures found while testing. Matching
+every command line with no exclusions reported an operator's own
+`grep -r Math_Symbol.js /` as a **confirmed compromise** — an incident responder
+would have implicated themselves. Narrowing to `argv[0]`/`argv[1]` fixed that but
+missed `bun run <payload>`, where the payload sits at `argv[2]`.
+
+**Findings name the PID only, never the command line.** Command lines can carry
+credentials passed as arguments, and findings are written to fleet console logs;
+printing one would relocate a secret. Asserted by a test.
+
+If the process table cannot be read, the check is skipped with a warning rather
+than silently passing.
+
+Not covered, and recorded in `docs/ToDo.md`: whether a LaunchAgent or systemd unit
+is *loaded* (as opposed to its file existing), the `loginctl enable-linger` marker,
+and the npm cache. A `launchctl`/`systemctl` query would catch a unit that is
+registered while its plist has been deleted.
+
+### 4.3 Lockfile coverage
 
 `PKGVER` matches two independent sources:
 
@@ -178,7 +216,7 @@ git, `file:`, `link:`, and `workspace:` dependencies; yarn berry `patch:`
 resolutions, which are percent-encoded; pnpm and bun alias forms; and npm entries
 that carry no `resolved` field.
 
-### 4.3 Severity
+### 4.4 Severity
 
 - `CONFIRMED` — the artifact has no benign explanation. Payload files, matching
   hashes, host persistence units, exfil markers.

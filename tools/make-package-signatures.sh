@@ -1,7 +1,7 @@
 #!/bin/sh
 # Generate a PKGVER signature file from a list of compromised name@version pairs.
 #
-#   ./tools/make-package-signatures.sh INPUT [CAMPAIGN] [VERSION] > out.conf
+#   ./tools/make-package-signatures.sh INPUT [CAMPAIGN] [SIGVERSION] [UPDATED] > out.conf
 #
 # INPUT is a text file with one `name@version` per line. Blank lines and lines
 # starting with `#` are ignored. Anything that is not a well-formed name@version
@@ -20,7 +20,7 @@ set -eu
 PROGNAME="make-package-signatures"
 
 usage() {
-	printf 'usage: %s INPUT [CAMPAIGN] [SIGVERSION]\n' "$PROGNAME" >&2
+	printf 'usage: %s INPUT [CAMPAIGN] [SIGVERSION] [UPDATED]\n' "$PROGNAME" >&2
 	exit 2
 }
 
@@ -28,6 +28,9 @@ usage() {
 INPUT=$1
 CAMPAIGN=${2:-"Shai-Hulud: Here We Go Again (keyv / cacheable npm worm)"}
 SIGVERSION=${3:-"$(date -u '+%Y.%m.%d').1"}
+# Taken as an argument so output depends only on inputs. Embedding "today" would
+# make the file differ every day and defeat the drift check in tools/checks.sh.
+UPDATED=${4:-"$(date -u '+%Y-%m-%d')"}
 
 [ -f "$INPUT" ] || {
 	printf '%s: input not found: %s\n' "$PROGNAME" "$INPUT" >&2
@@ -107,7 +110,7 @@ cat <<EOF
 #
 #!campaign  $CAMPAIGN
 #!version   $SIGVERSION
-#!updated   $(date -u '+%Y-%m-%d')
+#!updated   $UPDATED
 # Indicator sources. This list is a UNION of these feeds -- no single one is
 # complete. Credit and per-source detail: docs/references.md
 #!reference https://github.com/wiz-sec-public/wiz-research-iocs/blob/main/reports/keyv-packages.csv

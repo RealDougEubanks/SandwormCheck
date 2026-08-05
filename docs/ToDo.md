@@ -18,6 +18,12 @@
   `tools/merge-package-list.sh`; see `docs/signatures.md`. Remaining avenue: re-query
   OSV.dev, which held no advisories for this campaign at all when checked. All source
   lists were labelled "Ongoing" at collection, so a periodic re-pull is warranted.
+- **Loaded-but-fileless persistence is not detected.** The `PROCESS` check finds a
+  running watcher, and `PATHEXISTS` finds the LaunchAgent plist or systemd unit file, but
+  nothing queries `launchctl list` or `systemctl --user list-units`. A unit that is
+  registered while its file has been deleted would be missed until it next spawns. Same
+  for the `loginctl enable-linger` marker under `/var/lib/systemd/linger/`, which was
+  left out because linger is legitimately enabled on many hosts and would false-positive.
 - **No npm cache tarball inspection.** A malicious tarball sitting in `~/.npm/_cacache`
   is not detected unless it has been extracted. Worth adding as a `SUSPECT` check.
 - **The Windows port has only been exercised via PowerShell 7 on macOS.** The logic is
@@ -62,6 +68,20 @@
   lockfile matching, hashing, and content matching were each O(signatures x files) or
   worse. See the table in `docs/spec.md` section 11. `--verbose` now reports elapsed
   seconds per stage so regressions are visible.
+
+## Repository hygiene
+
+- Branch protection is applied with `tools/setup-repo-protection.sh`. It currently
+  exempts admins from the review requirement, because requiring an approving review with
+  one maintainer would block every merge. When a second maintainer joins, re-run it with
+  `REQUIRE_APPROVALS=1 ENFORCE_ADMINS=true`.
+- Required status check names in that script must match the rendered job names in
+  `.github/workflows/test.yml`. The script verifies this, because a renamed job would
+  otherwise silently stop being required.
+- GitHub Actions are pinned to commit SHAs rather than tags; Dependabot proposes bumps
+  weekly. A tag is a mutable reference, which is the attack class this tool detects.
+- Not yet done: no CodeQL (little value for shell and PowerShell), no signed commits or
+  signed tags, and no release process — `main` is the supported version.
 
 ## Deliberately not planned
 

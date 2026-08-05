@@ -66,6 +66,12 @@ what, and [docs/references.md](docs/references.md) for per-indicator provenance.
   tree stays dangerous even after you delete `node_modules`.
 - **Host persistence** — the `gh-token-monitor` dead-man's switch: its state directory,
   watcher script, macOS LaunchAgent, and Linux systemd user unit.
+- **A live implant with no files left** — the running watcher or payload is detected from
+  the process table, because the switch polls every 60 seconds and the payload
+  self-destructs after 24 hours, so the process can outlive its artifacts. Findings name
+  the PID only, never the command line, which can contain credentials.
+- **npm/pnpm/yarn debug logs** — these record the `preinstall` hook that ran, which
+  survives deleting `node_modules`.
 - **Exfiltration markers** — the `Shai-Hulud: Here We Go Again` string and the embedded
   threat string unique to this payload.
 - **C2 and staging domains** — `npm-cache.com`, `pypi-get.com`, `js-mirror.com`.
@@ -232,12 +238,22 @@ up on the next run. Seven check types are supported: `PATHEXISTS`, `PATHGLOB`, `
 `SHA256`, `SHA1`, `PKGVER`, and `CONTENT`. The format contract, the false-positive rules, and
 a worked example are in [docs/signatures.md](docs/signatures.md).
 
-## Testing
+## Development
+
+```sh
+./tools/install-hooks.sh    # pre-commit, pre-push, commit-msg
+./tools/checks.sh           # everything CI runs: lint, secret scan, tests
+```
 
 ```sh
 ./tests/run-tests.sh                              # against /bin/sh
 SHELLS="sh bash dash zsh" ./tests/run-tests.sh    # every shell you care about
 ```
+
+The hooks and CI both call `tools/checks.sh`, so "it passed locally" and "it passed in
+CI" mean the same thing. Checks whose tool is missing are skipped with a warning rather
+than blocking a commit; CI installs everything and is the real gate. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 153 assertions covering every check type (true positive and true negative), all five exit
 codes, every lockfile format, signature and argument validation, secret non-disclosure,
@@ -259,6 +275,8 @@ inert placeholder text — no live malware is in this repo.
 | [docs/references.md](docs/references.md) | Source advisories and IOC provenance |
 | [docs/assumptions.md](docs/assumptions.md) | Recorded design decisions and accepted risks |
 | [docs/ToDo.md](docs/ToDo.md) | Known gaps and planned work |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow, hooks, and signature-authoring rules |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability in the scanner |
 
 ## Credits
 
@@ -292,4 +310,7 @@ comes back `20`, treat it as an incident first and file the bug second.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+BSD 3-Clause. See [LICENSE](LICENSE).
+
+The non-endorsement clause is relevant here: this project cites Wiz, Socket, JFrog,
+CyberKendra, and Aikido for attribution only, and none of them endorse it.

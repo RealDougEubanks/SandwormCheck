@@ -1,52 +1,96 @@
-name: tests
+name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  # Signatures reference live vendor feeds and the package list goes stale.
+  # A weekly run surfaces breakage that no commit triggered.
+  schedule:
+    - cron: '17 6 * * 1'
 
+# Least privilege: nothing here needs write access.
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  shell:
-    name: shell scanner (${{ matrix.os }})
+  checks:
+    name: lint + security (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to a commit SHA, not a tag. A tag is a
+      # mutable reference, and moving a tag under a consumer is precisely the
+      # attack this repository exists to detect. Dependabot proposes SHA bumps.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Install dash and shellcheck
+      - name: Install shellcheck (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y dash shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck dash
 
-      - name: Install shellcheck
+      - name: Install shellcheck (macOS)
         if: runner.os == 'macOS'
         run: brew install shellcheck
 
-      - name: Lint
-        run: shellcheck -s sh sandwormcheck.sh tests/run-tests.sh
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
 
-      - name: Test across shells
+      # The same entry point the git hooks use, so local and CI cannot disagree.
+      - name: Repository checks
+        run: ./tools/checks.sh
+
+  shells:
+    name: test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install dash
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dash
+
+      - name: Run across every shell we claim to support
         run: SHELLS="sh bash dash" ./tests/run-tests.sh
 
   powershell:
     name: PowerShell port (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1 `
+          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1, ./tools/run-latest.ps1 `
             -Settings ./PSScriptAnalyzerSettings.psd1 -Severity Error,Warning
           $issues | Format-Table -AutoSize
           if ($issues) { exit 1 }
+
+      # Windows PowerShell 5.1 reads a BOM-less file as ANSI, so a non-ASCII byte
+      # can corrupt surrounding string literals only on this platform.
+      - name: PowerShell sources are pure ASCII
+        shell: pwsh
+        run: |
+          $bad = @()
+          foreach ($f in @('SandwormCheck.ps1', 'tools/run-latest.ps1')) {
+            $bytes = [IO.File]::ReadAllBytes($f)
+            if ($bytes | Where-Object { $_ -gt 127 }) { $bad += $f }
+          }
+          if ($bad) { Write-Host "non-ASCII in: $($bad -join ', ')"; exit 1 }
+          Write-Host 'ok: pure ASCII'
 
       - name: Verdict tiers and exit codes
         shell: pwsh
@@ -54,11 +98,18 @@ jobs:
           $cases = @(
             @{ Tree = 'clean';     Expect = 0  },
             @{ Tree = 'suspect';   Expect = 10 },
-            @{ Tree = 'confirmed'; Expect = 20 }
+            @{ Tree = 'confirmed'; Expect = 20 },
+            @{ Tree = 'lockfile/npm3';       Expect = 10 },
+            @{ Tree = 'lockfile/yarn1';      Expect = 10 },
+            @{ Tree = 'lockfile/pnpm9';      Expect = 10 },
+            @{ Tree = 'lockfile/clean-lock'; Expect = 0  },
+            @{ Tree = 'lockfile/fp-basename'; Expect = 0 },
+            @{ Tree = 'lockfile/nested';     Expect = 0  },
+            @{ Tree = 'legit-setup';         Expect = 0  }
           )
           $failed = $false
           foreach ($c in $cases) {
-            & ./SandwormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor
+            & ./SandwormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor -Quiet
             if ($LASTEXITCODE -ne $c.Expect) {
               Write-Host "FAIL $($c.Tree): expected $($c.Expect), got $LASTEXITCODE"
               $failed = $true
@@ -86,3 +137,16 @@ jobs:
           if ($d.verdict -ne 'CONFIRMED') { Write-Host "FAIL: bad verdict $($d.verdict)"; exit 1 }
           if ($d.exit_code -ne $code) { Write-Host "FAIL: exit_code $($d.exit_code) != $code"; exit 1 }
           Write-Host 'ok   JSON schema, verdict, and exit code agree'
+
+      - name: Report does not echo matched file contents
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path secret/proj/node_modules/pkg | Out-Null
+          'npm-cache.com ghp_THISISAFAKETOKENVALUE000000000000' |
+            Set-Content secret/proj/node_modules/pkg/Math_Symbol.js
+          '{"name":"pkg","version":"1.0.0"}' | Set-Content secret/proj/node_modules/pkg/package.json
+          $out = & ./SandwormCheck.ps1 -Path secret -SignaturePath signatures -NoColor 2>&1 | Out-String
+          if ($out -match 'ghp_THISISAFAKETOKENVALUE') {
+            Write-Host 'FAIL: report echoed matched file contents'; exit 1
+          }
+          Write-Host 'ok   no file contents in the report'

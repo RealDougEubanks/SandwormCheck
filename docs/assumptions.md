@@ -268,3 +268,106 @@ only a lockfile). Guarding at the call site is more robust than relying on every
 function to return a non-empty collection.
 **Recorded by:** Claude
 **Date:** 2026-08-04
+
+---
+
+**Assumption:** The git hooks and CI both invoke `tools/checks.sh` rather than each
+defining their own checks.
+**Why:** Two definitions drift, and then "it passed locally" and "it passed in CI" stop
+meaning the same thing — which is how a check quietly stops running. One entry point with
+`--staged` and `--quick` flags keeps them identical by construction.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Hooks skip a check whose tool is missing, and warn, rather than failing
+the commit.
+**Why:** A contributor without shellcheck should still be able to clone and commit. The
+alternative makes the toolchain a barrier to entry for a tool whose whole premise is
+having no dependencies. CI installs everything and is the enforcing gate, so nothing
+reaches `main` unchecked either way. This is a deliberate trade of local strictness for
+approachability, not an oversight.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `tools/make-package-signatures.sh` takes the `#!updated` date as an
+argument instead of using today's date.
+**Why:** Embedding the clock made the generated file differ every day, so the drift check
+in `tools/checks.sh` failed for a reason unrelated to content. A generator whose output
+depends only on its inputs can be verified byte-for-byte; one that reads the clock cannot.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Branch protection requires a pull request and passing CI, but exempts
+admins from the review requirement (`enforce_admins: false`,
+`required_approving_review_count: 0`).
+**Why:** With a single maintainer, requiring an approving review would make every merge
+impossible, and requiring admin enforcement would lock the owner out of their own
+repository. This enforces the parts that catch real mistakes — a PR to read the diff on,
+and green CI — without a rule that can only be satisfied by disabling it. Documented in
+`tools/setup-repo-protection.sh` with the exact settings to change when a second
+maintainer joins.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** GitHub Actions are pinned to commit SHAs, not version tags.
+**Why:** A tag is a mutable reference. Moving a tag under a consumer is the same attack
+class this repository exists to detect, so pinning by tag in a supply chain scanner would
+be self-undermining. Dependabot is configured to propose SHA bumps weekly so pinning does
+not mean going stale.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The secret scan in `tools/checks.sh` excludes `tests/fixtures/` and
+`*.md`, and uses conservative provider-prefixed patterns.
+**Why:** Fixtures deliberately contain inert fake tokens to prove the scanner does not
+echo file contents, and the docs quote credential formats. Scanning them would produce
+permanent false failures and train contributors to bypass the hook with `--no-verify`,
+which is worse than a narrower scan. Patterns require a provider prefix
+(`ghp_`, `AKIA`, `npm_`, ...) rather than entropy heuristics, for the same
+false-positive-cost reason that governs the detection signatures themselves.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `PROCESS` findings report the PID only, never the matched command line.
+**Why:** Command lines routinely carry credentials as arguments, and findings are written
+to fleet console logs. Printing one would move a secret into a new system with different
+access controls, which is the same reasoning that keeps file contents out of every other
+finding. Asserted by a test.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `PROCESS` matching searches the full argument list but skips processes
+whose executable is an inspection tool, and does not skip interpreters.
+**Why:** Three revisions were needed. Matching all command lines with no exclusions
+reported an operator's own `grep -r Math_Symbol.js /` as a CONFIRMED compromise, so an
+incident responder investigating a host would implicate themselves. Restricting to
+`argv[0]`/`argv[1]` removed that but missed `bun run <payload>`, where the payload is at
+`argv[2]`. Excluding by executable restores full argument coverage without the
+self-report. Interpreters must stay in scope because the real `gh-token-monitor.sh` runs
+as `/bin/sh /path/gh-token-monitor.sh`; an intermediate revision skipped shells and
+missed it entirely.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** npm, pnpm, and yarn debug logs are included in the content candidate set.
+**Why:** Those logs record the `preinstall` hook that ran, which survives deleting
+`node_modules` and is often the only remaining trace on a host that was partially cleaned.
+Cheap to add, since the logs are few and small.
+**Recorded by:** Claude
+**Date:** 2026-08-05

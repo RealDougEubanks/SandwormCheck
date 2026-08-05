@@ -151,7 +151,7 @@ function Import-Signatures {
     param([string[]] $Files)
 
     $records = New-Object System.Collections.ArrayList
-    $validTypes = @('PATHEXISTS', 'PATHGLOB', 'FILENAME', 'SHA256', 'SHA1', 'PKGVER', 'CONTENT')
+    $validTypes = @('PATHEXISTS', 'PATHGLOB', 'FILENAME', 'SHA256', 'SHA1', 'PKGVER', 'CONTENT', 'PROCESS')
 
     foreach ($file in $Files) {
         try {
@@ -535,6 +535,117 @@ function Invoke-PkgVerCheck {
         if ($wanted.ContainsKey($nv)) {
             foreach ($sig in $wanted[$nv]) {
                 Add-Finding $sig.Severity $sig.Id $file "installed $nv" $sig.Description
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Live implant processes
+#
+# Without this the scanner is blind to a running implant whose files have been
+# removed: the dead-man's switch polls GitHub every 60 seconds, so the process can
+# outlive its artifacts. Reporting that host as clean would be a false clean.
+#
+# Read-only: reads the process table and never signals or modifies anything.
+# ---------------------------------------------------------------------------
+
+# Tools whose normal job is to name a file they are inspecting, so an implant
+# filename in their arguments means nothing. Interpreters are deliberately NOT
+# listed: the real gh-token-monitor.sh is a shell script, so it appears as
+# "/bin/sh /path/gh-token-monitor.sh" and skipping shells would miss it.
+$script:ProcSkipTools = @(
+    'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'find', 'locate', 'mdfind',
+    'awk', 'sed', 'cat', 'less', 'more', 'head', 'tail', 'vi', 'vim', 'nvim',
+    'emacs', 'nano', 'code', 'subl', 'open', 'strings', 'xxd', 'od', 'file',
+    'ps', 'pgrep', 'wc', 'sort', 'uniq', 'diff', 'cmp', 'md5', 'shasum',
+    'sha256sum', 'findstr', 'select-string', 'notepad', 'notepad++'
+)
+
+function Get-ProcessTable {
+    # Returns objects with Pid, ParentPid, Exe, and Args.
+    $rows = New-Object System.Collections.ArrayList
+    $onWindows = $true
+    $v = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+    if ($v) { $onWindows = [bool] $v.Value }   # PowerShell 7 defines this
+    # Windows PowerShell 5.1 does not define $IsWindows, and only runs on Windows.
+
+    if ($onWindows) {
+        try {
+            foreach ($p in Get-CimInstance Win32_Process -ErrorAction Stop) {
+                $cmd = if ($p.CommandLine) { $p.CommandLine } else { $p.Name }
+                [void] $rows.Add([PSCustomObject]@{
+                    Pid = [int] $p.ProcessId
+                    ParentPid = [int] $p.ParentProcessId
+                    Exe = $p.Name
+                    Args = $cmd
+                })
+            }
+        } catch {
+            Write-Warn "could not read the process table; PROCESS checks were SKIPPED"
+            return $null
+        }
+    } else {
+        try {
+            $out = & ps -Ao 'pid=,ppid=,args=' 2>$null
+            if (-not $out) { $out = & ps ax -o 'pid=,ppid=,args=' 2>$null }
+            if (-not $out) { throw 'ps produced no output' }
+            foreach ($line in $out) {
+                $t = $line.Trim() -split '\s+', 3
+                if ($t.Count -lt 3) { continue }
+                $exe = ($t[2] -split '\s+')[0]
+                [void] $rows.Add([PSCustomObject]@{
+                    Pid = [int] $t[0]
+                    ParentPid = [int] $t[1]
+                    Exe = $exe
+                    Args = $t[2]
+                })
+            }
+        } catch {
+            Write-Warn "could not read the process table; PROCESS checks were SKIPPED"
+            return $null
+        }
+    }
+    return $rows
+}
+
+function Invoke-ProcessCheck {
+    param([object[]] $Signatures)
+
+    $sigs = @($Signatures | Where-Object { $_.Type -eq 'PROCESS' })
+    if ($sigs.Count -eq 0) { return }
+
+    $table = Get-ProcessTable
+    if ($null -eq $table) { return }
+
+    $byPid = @{}
+    foreach ($r in $table) { $byPid[$r.Pid] = $r }
+
+    # Every ancestor of this scan: an operator's own investigation command
+    # frequently names the artifacts, and our argv mentions the signature path.
+    $mine = New-Object System.Collections.Generic.HashSet[int]
+    $cur = $PID
+    $guard = 0
+    while ($cur -and $cur -ne 0 -and $cur -ne 1 -and $guard -lt 40) {
+        [void] $mine.Add($cur)
+        if (-not $byPid.ContainsKey($cur)) { break }
+        $cur = $byPid[$cur].ParentPid
+        $guard++
+    }
+
+    foreach ($r in $table) {
+        if ($mine.Contains($r.Pid)) { continue }
+        $base = $r.Exe
+        $slash = [Math]::Max($base.LastIndexOf('/'), $base.LastIndexOf('\'))
+        if ($slash -ge 0) { $base = $base.Substring($slash + 1) }
+        $base = $base -replace '\.exe$', ''
+        if ($script:ProcSkipTools -contains $base.ToLowerInvariant()) { continue }
+
+        foreach ($sig in $sigs) {
+            if ($r.Args.IndexOf($sig.Pattern, [StringComparison]::Ordinal) -ge 0) {
+                # PID only, never the command line: command lines can carry
+                # credentials as arguments, and findings reach fleet console logs.
+                Add-Finding $sig.Severity $sig.Id "pid $($r.Pid)" 'process match' $sig.Description
             }
         }
     }
@@ -926,6 +1037,7 @@ function Invoke-Main {
     Invoke-PathExistsCheck -Signatures $signatures -HomeDirs $homeDirs
     Invoke-FilenameCheck -Signatures $signatures -Candidates $candidates
     Invoke-PathGlobCheck -Signatures $signatures -Candidates $candidates
+    Invoke-ProcessCheck -Signatures $signatures
     Invoke-PkgVerCheck -Signatures $signatures -AllFiles $allFilesArr
     Invoke-LockfileCheck -Signatures $signatures -AllFiles $allFilesArr
     Invoke-ContentCheck -Signatures $signatures -Candidates $candidates

@@ -1,0 +1,12 @@
+# Every change requests review from the maintainer. With branch protection
+# requiring a pull request, this makes the review request automatic rather than
+# something to remember.
+*                       @RealDougEubanks
+
+# Detection content and the design contract are the highest-consequence files in
+# the repository: a wrong signature either misses a compromise or cries wolf.
+/signatures/            @RealDougEubanks
+/docs/spec.md           @RealDougEubanks
+/docs/references.md     @RealDougEubanks
+/tools/                 @RealDougEubanks
+/.github/               @RealDougEubanks

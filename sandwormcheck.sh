@@ -403,7 +403,7 @@ load_signatures() {
 				for (i = 6; i <= n; i++) desc = desc "|" f[i]
 				desc = trim(desc)
 
-				if (type !~ /^(PATHEXISTS|PATHGLOB|FILENAME|SHA256|SHA1|PKGVER|CONTENT)$/)
+				if (type !~ /^(PATHEXISTS|PATHGLOB|FILENAME|SHA256|SHA1|PKGVER|CONTENT|PROCESS)$/)
 					fail(FNR, "unknown check type \x27" type "\x27")
 				if (sev != "CONFIRMED" && sev != "SUSPECT")
 					fail(FNR, "severity must be CONFIRMED or SUSPECT, got \x27" sev "\x27")
@@ -780,6 +780,101 @@ check_pkgver() {
 	' >>"$FINDINGS_FILE" 2>/dev/null || :
 }
 
+check_process() {
+	# Match signature patterns against the command lines of running processes.
+	#
+	# Without this the scanner is blind to a live implant whose files have been
+	# removed: this campaign's dead-man's switch polls GitHub every 60 seconds, so
+	# the process can outlive the artifacts on disk. Reporting that host as clean
+	# would be a false clean, the worst failure mode this tool has.
+	#
+	# Read-only: it reads the process table and never signals or modifies anything.
+	_sigs=$(sigs_of_type PROCESS)
+	[ -n "$_sigs" ] || return 0
+
+	# BSD and GNU ps disagree on flags; try each before giving up.
+	if ps -Ao pid=,ppid=,args= >"$WORKDIR/ps" 2>/dev/null && [ -s "$WORKDIR/ps" ]; then
+		:
+	elif ps ax -o pid=,ppid=,args= >"$WORKDIR/ps" 2>/dev/null && [ -s "$WORKDIR/ps" ]; then
+		:
+	elif ps -eo pid=,ppid=,args= >"$WORKDIR/ps" 2>/dev/null && [ -s "$WORKDIR/ps" ]; then
+		:
+	else
+		# Loud, not silent: a skipped check must never look like a passed one.
+		warn "could not read the process table; PROCESS checks were SKIPPED"
+		return 0
+	fi
+
+	# Every ancestor of this scan, so the shell that launched us cannot be reported.
+	# An operator's own investigation command frequently names the artifacts.
+	: >"$WORKDIR/psskip"
+	_p=$$
+	_guard=0
+	while [ -n "$_p" ] && [ "$_p" != "0" ] && [ "$_p" != "1" ] && [ "$_guard" -lt 40 ]; do
+		printf '%s\n' "$_p" >>"$WORKDIR/psskip"
+		_p=$(awk -v t="$_p" '$1==t {print $2; exit}' "$WORKDIR/ps" 2>/dev/null)
+		_guard=$((_guard + 1))
+	done
+
+	sigs_of_type PROCESS >"$WORKDIR/pssigs"
+
+	# Matching searches the whole argument list, but skips processes whose
+	# executable is an inspection tool.
+	#
+	# An earlier revision searched every command line with no exclusions and
+	# flagged the operator's own `grep -r Math_Symbol.js /` as a CONFIRMED
+	# compromise -- an incident responder investigating the host would have
+	# implicated themselves. The next revision searched only argv[0] and argv[1],
+	# which fixed that but missed `bun run <payload>` and any invocation carrying a
+	# flag, because the payload then sits at argv[2] or later. Excluding by
+	# executable keeps full argument coverage without the self-report.
+	awk -v skipfile="$WORKDIR/psskip" -v sigfile="$WORKDIR/pssigs" '
+		BEGIN {
+			while ((getline p < skipfile) > 0) if (p != "") mine[p] = 1
+			close(skipfile)
+			while ((getline l < sigfile) > 0) {
+				n = split(l, f, "|")
+				if (n < 5) continue
+				d = f[5]
+				for (i = 6; i <= n; i++) d = d "|" f[i]
+				k++; sev[k] = f[2]; id[k] = f[3]; pat[k] = f[4]; desc[k] = d
+			}
+			close(sigfile)
+			# Tools whose normal job is to name a file they are inspecting, so
+			# seeing an implant filename in their arguments means nothing.
+			#
+			# Interpreters are deliberately NOT in this list. The real
+			# gh-token-monitor.sh is a shell script, so ps shows it as
+			# "/bin/sh /path/gh-token-monitor.sh"; skipping shells here made the
+			# check miss the exact implant it exists to find.
+			split("grep egrep fgrep rg ag ack find locate mdfind awk sed cat less more " \
+			      "head tail vi vim nvim emacs nano code subl open strings xxd od file " \
+			      "ps pgrep wc sort uniq diff cmp md5 shasum sha256sum", t, " ")
+			for (i in t) tool[t[i]] = 1
+		}
+		{
+			pid = $1
+			if (pid in mine) next
+			exe = $3
+			# Basename of the executable.
+			b = exe
+			if (match(b, /\/[^\/]+$/)) b = substr(b, RSTART + 1)
+			if (b in tool) next
+			# Full argument list, fields 3..NF.
+			hay = ""
+			for (j = 3; j <= NF; j++) hay = hay " " $j
+			for (i = 1; i <= k; i++) {
+				if (index(hay, pat[i]) > 0) {
+					# PID only, never the command line: command lines can carry
+					# credentials as arguments, and findings reach fleet console
+					# logs. See docs/spec.md section 8.
+					printf "%s|%s|pid %s|process match|%s\n", sev[i], id[i], pid, desc[i]
+				}
+			}
+		}
+	' "$WORKDIR/ps" >>"$FINDINGS_FILE" 2>/dev/null || :
+}
+
 # ---------------------------------------------------------------------------
 # Lockfile pins (spec §4.2)
 #
@@ -971,6 +1066,9 @@ build_file_lists() {
 	{
 		grep -Fs -f "$WORKDIR/namepat" "$WORKDIR/allfiles" 2>/dev/null || :
 		grep -Es '/(node_modules|\.claude|\.vscode)/' "$WORKDIR/allfiles" 2>/dev/null || :
+		# npm/yarn/pnpm debug logs record the preinstall hook that ran, which
+		# survives deleting node_modules and is often the only remaining trace.
+		grep -Es '/(_logs|\.npm/_logs|\.pnpm-debug|\.yarn/cache)/' "$WORKDIR/allfiles" 2>/dev/null || :
 	} | sort -u >"$CANDIDATES_FILE"
 
 	# Hash candidates are deliberately NARROW: only files whose basename a
@@ -1203,6 +1301,8 @@ main() {
 	check_pkgver
 	info "checking lockfile pins"
 	check_lockfiles
+	info "checking running processes"
+	check_process
 	info "checking content markers"
 	check_content
 	info "checking hashes"

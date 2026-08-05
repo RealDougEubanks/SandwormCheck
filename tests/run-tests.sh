@@ -267,6 +267,49 @@ test_lockfiles() {
 	refute_out "pinned" "oversized lockfile produces no pin"
 }
 
+test_process_check() {
+	section "PROCESS check: live implant with no files on disk [$CURRENT_SHELL]"
+
+	mkdir -p "$TMP/procempty" "$TMP/procbin"
+	printf '#!/bin/sh\nsleep 20\n' >"$TMP/procbin/gh-token-monitor.sh"
+	printf '#!/bin/sh\nsleep 20\n' >"$TMP/procbin/bun"
+	chmod +x "$TMP/procbin/gh-token-monitor.sh" "$TMP/procbin/bun"
+
+	# The scan root is empty, so only the process table can produce a finding.
+	# This is the false-clean case the check exists for: the dead-man's switch
+	# polls every 60s and can outlive its own files.
+	"$TMP/procbin/gh-token-monitor.sh" &
+	_w1=$!
+	"$TMP/procbin/bun" run /tmp/nowhere/Math_Symbol.js &
+	_w2=$!
+	sleep 1
+
+	run 20 "a running watcher is found with nothing on disk" \
+		--path "$TMP/procempty" --signatures "$SIGS" --no-color
+	expect_out "SH25-X001" "PROCESS detects the gh-token-monitor watcher"
+	expect_out "SH25-X002" "PROCESS detects the payload past argv[1] (bun run ...)"
+	# Command lines can carry credentials as arguments, and findings reach fleet
+	# console logs, so only the PID may be reported.
+	refute_out "gh-token-monitor.sh" "the finding names the PID, not the command line"
+	refute_out "$TMP/procbin" "no command-line path is echoed"
+
+	kill "$_w1" "$_w2" 2>/dev/null || :
+	sleep 1
+	run 0 "after the processes exit, the same scan is clean" \
+		--path "$TMP/procempty" --signatures "$SIGS" --no-color
+
+	# An incident responder searching for these artifacts must not implicate
+	# themselves. An earlier revision reported the operator's own grep as a
+	# CONFIRMED compromise.
+	grep -r "Math_Symbol.js gh-token-monitor math_init.js" "$TMP/procempty" >/dev/null 2>&1 &
+	_g=$!
+	sleep 1
+	run 0 "an operator grepping for the artifacts is not flagged" \
+		--path "$TMP/procempty" --signatures "$SIGS" --no-color
+	refute_out "SH25-X" "no PROCESS finding from a search tool"
+	wait "$_g" 2>/dev/null || :
+}
+
 test_signature_validation() {
 	section "signature validation [$CURRENT_SHELL]"
 
@@ -693,6 +736,7 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_check_types
 	test_true_negatives
 	test_lockfiles
+	test_process_check
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

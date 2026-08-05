@@ -68,6 +68,22 @@ locations are covered — including macOS's root account, whose home is `/var/ro
 | `20` | **Confirmed** — payload, persistence, or exfiltration artifact found | Treat the host as compromised: isolate it and rotate its credentials |
 | `1` | Scanner error — bad signature file, or the scan did not finish | Fix and re-run. **This is not a clean result.** |
 | `2` | Usage error — bad flag or argument | Fix the invocation |
+| `124`, `137`, `143` | **Not produced by this tool.** Something killed the process — usually a fleet agent's own command timeout (`124`), or `SIGKILL`/`SIGTERM` | Lower `--timeout` **below** the agent's limit, or narrow the scan with `--path`. See below. |
+
+### Why the scanner's timeout must be *below* the agent's
+
+If the agent kills the process you get **no verdict at all**. If the scanner stops
+itself you get exit `1`, meaning "no answer yet", which is triageable:
+
+```
+agent limit 600s, scanner --timeout 1800  ->  killed at 600s   ->  124, nothing
+agent limit 600s, scanner --timeout 540   ->  stops itself     ->  1, plus findings so far
+```
+
+Raising the scanner's timeout above the agent's guarantees the agent wins the race. A
+truncated scan still runs the cheap, high-signal checks first — persistence paths,
+filenames, running processes, package versions, lockfiles — and only skips the expensive
+content and hash sweeps, so a self-truncated scan is far from worthless.
 
 The distinction between `10` and `20` is the useful part at fleet scale. A `10` is a
 Monday-morning dependency bump. A `20` means someone's npm and cloud credentials are
@@ -239,7 +255,7 @@ fi
 }
 [ "$updated" -eq 1 ] || echo "WARNING: update failed; scanning with the existing copy" >&2
 
-sh "$DEST/sandwormcheck.sh" --timeout 1500
+sh "$DEST/sandwormcheck.sh" --timeout 1800
 ```
 
 ### Windows
@@ -310,7 +326,7 @@ if (-not $updated) {
 # Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
 # would report this host as clean when it was never scanned.
 $global:LASTEXITCODE = $null
-& $scanner -TimeoutSeconds 1500
+& $scanner -TimeoutSeconds 1800
 if ($null -eq $LASTEXITCODE) {
     [Console]::Error.WriteLine('scanner produced no exit code'); exit 1
 }

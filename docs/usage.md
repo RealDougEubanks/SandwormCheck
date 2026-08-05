@@ -274,6 +274,13 @@ could report a host as clean when it was not scanned properly.
 The scanner could not read those paths, so it cannot vouch for them. Re-run with `sudo`
 or as Administrator.
 
+**Exit 124, 137, or 143**
+Not SandwormCheck codes — it only exits 0, 1, 2, 10, or 20. Something killed the process:
+`124` is the conventional "timed out" status used by fleet agents and `timeout(1)`, and
+`137`/`143` are `SIGKILL`/`SIGTERM`. You have no verdict for that host. Set `--timeout`
+below whatever limit is killing it so the scanner truncates itself and reports exit `1`
+instead, or narrow the scan with `--path`.
+
 **"SCAN TRUNCATED"**
 The timeout expired mid-walk. Raise `--timeout` or narrow the scope with `--path`. The
 exit code will be `1` rather than `0` if nothing was found, because the scan is

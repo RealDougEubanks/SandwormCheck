@@ -640,3 +640,30 @@ a host where it was unset: `Join-Path $env:TEMP ...` yielded null and the downlo
 collapsed with a misleading "could not obtain SandwormCheck".
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** `tools/checks.sh` asserts that both engines share the same defaults.
+**Why:** The sh timeout default was raised from 900s to 1800s and the PowerShell default was
+left at 900. Every Windows host therefore ran a shorter budget than every Mac and Linux
+host, and a large Windows machine would truncate and report exit 1 where Unix completed
+cleanly. The parity tests compared verdicts, findings and exit codes, so they never noticed:
+the divergence was in a default, one layer below what they check. The new check reads
+`timeout`, `max-depth` and `max-file-size` from both sources and fails if any differ,
+verified by deliberately reintroducing the drift.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Exit codes other than 0, 1, 2, 10 and 20 are documented as externally
+imposed, and the scanner's `--timeout` is documented as needing to sit BELOW any fleet
+agent's own command timeout.
+**Why:** Windows hosts reported exit `124`, which this tool cannot produce. `124` is the
+conventional "timed out" status, so the agent's command timeout was firing first and killing
+the process — which yields no verdict at all, strictly worse than a self-reported truncation.
+Raising the scanner's own budget makes this worse rather than better, because it guarantees
+the agent wins the race. The scanner runs its cheap high-signal checks first precisely so
+that a self-truncated scan is still useful.
+**Recorded by:** Claude
+**Date:** 2026-08-05

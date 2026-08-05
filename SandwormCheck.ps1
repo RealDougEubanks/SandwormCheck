@@ -37,7 +37,8 @@
     (1024-1073741824, default 8388608).
 
 .PARAMETER TimeoutSeconds
-    Wall-clock scan limit (10-86400, default 900).
+    Wall-clock scan limit for the whole scan (10-86400, default 1800). Must match
+    the sh scanner's default; tools/checks.sh asserts that they agree.
 
 .PARAMETER Json
     Emit a single JSON object instead of the text report.
@@ -72,7 +73,7 @@ param(
 
     [long] $MaxFileSize = 8388608,
 
-    [int] $TimeoutSeconds = 900,
+    [int] $TimeoutSeconds = 1800,
 
     [switch] $Json,
 

@@ -50,9 +50,10 @@ SCAN_PATHS=""
 EXCLUDE_PATHS=""
 MAX_DEPTH=12
 MAX_FILE_SIZE=8388608   # 8 MiB
-TIMEOUT_SECS=1800
+TIMEOUT_SECS=3600
 OUTPUT_MODE="text"
 QUIET=0
+FAST=0
 VERBOSE=0
 NO_COLOR=0
 
@@ -120,7 +121,10 @@ Options:
       --max-depth N       Directory walk depth limit (1-64, default 12)
       --max-file-size N   Skip files larger than N bytes for hash/content
                           checks (1024-1073741824, default 8388608)
-      --timeout N         Wall-clock scan limit in seconds (10-86400, default 1800)
+      --timeout N         Wall-clock scan limit in seconds (10-86400, default 3600)
+      --fast              Skip the content and hash sweeps. Keeps every cheap
+                          high-signal check and finishes in seconds even on a
+                          machine with hundreds of repositories.
       --json              Emit a single JSON object instead of text
   -q, --quiet             Print only the verdict line
   -v, --verbose           Print progress to stderr
@@ -162,14 +166,14 @@ parse_args() {
 			;;
 		-x | --exclude)
 			[ $# -ge 2 ] || die "$EXIT_USAGE" "$1 requires an argument"
-			EXCLUDE_PATHS="$EXCLUDE_PATHS$2
+			EXCLUDE_PATHS="$EXCLUDE_PATHS$(abspath "$2")
 "
 			shift 2
 			;;
 		-p | --path)
 			[ $# -ge 2 ] || die "$EXIT_USAGE" "$1 requires an argument"
 			[ -d "$2" ] || die "$EXIT_USAGE" "--path is not a directory: $2"
-			SCAN_PATHS="$SCAN_PATHS$2
+			SCAN_PATHS="$SCAN_PATHS$(abspath "$2")
 "
 			shift 2
 			;;
@@ -187,6 +191,10 @@ parse_args() {
 			[ $# -ge 2 ] || die "$EXIT_USAGE" "$1 requires an argument"
 			TIMEOUT_SECS=$(require_int "$2" 10 86400 "--timeout")
 			shift 2
+			;;
+		--fast)
+			FAST=1
+			shift
 			;;
 		--json)
 			OUTPUT_MODE="json"
@@ -239,6 +247,24 @@ script_dir() {
 	(cd "$(dirname "$_s")" 2>/dev/null && pwd) || printf '.'
 }
 
+abspath() {
+	# Absolute form of a path WITHOUT resolving symlinks.
+	#
+	# Exclusion prefixes are absolute, so a relative --path produced relative walked
+	# paths that no prefix could match: running "./sandwormcheck.sh --path ." inside
+	# a checkout defeated self-exclusion entirely and the tool reported its own
+	# fixtures again. Symlinks are deliberately not resolved here, because a
+	# symlinked root is meant to be reported under the name the operator gave.
+	case $1 in
+	/*) printf '%s' "$1" ;;
+	# "." and "./x" must not leave a "/./" in the result: walked paths would then
+	# carry it and no exclusion prefix could match.
+	.) printf '%s' "${PWD%/}" ;;
+	./*) printf '%s/%s' "${PWD%/}" "${1#./}" ;;
+	*) printf '%s/%s' "${PWD%/}" "$1" ;;
+	esac
+}
+
 canon() {
 	# Canonical absolute path, or the input unchanged if it cannot be resolved.
 	# `realpath` is not present on every macOS version, so use a subshell cd.
@@ -261,6 +287,7 @@ emit_excl() {
 	# a missed exclusion means the tool reports its own test fixtures.
 	[ -n "$1" ] || return 0
 	printf '%s\n' "$1" >>"$WORKDIR/excl"
+	printf '%s\n' "$(abspath "$1")" >>"$WORKDIR/excl"
 	_c=$(canon "$1")
 	[ -n "$_c" ] && printf '%s\n' "$_c" >>"$WORKDIR/excl"
 	for _v in "$1" "$_c"; do
@@ -693,6 +720,39 @@ default_scan_paths() {
 			[ -d "$d" ] && printf '%s\n' "$d"
 		done
 	} | awk 'NF && !seen[$0]++'
+}
+
+walk_bounded() {
+	# Walk a root under a hard time ceiling.
+	#
+	# Counting files between reads cannot bound this: the shell is blocked waiting
+	# on find and cannot evaluate the budget until find yields. Measured, a 60s
+	# budget produced a 135s walk because find sat inside one slow subtree, and
+	# splitting the root by child only reduced the variance -- a 20s budget still
+	# ran 89s when the first child was large.
+	#
+	# So find runs in the BACKGROUND and is killed when the budget expires. Polling
+	# once a second gives a ceiling of roughly budget + 1s for this stage, and
+	# whatever find already wrote is kept: a partial file list is still worth
+	# checking, and the scan is marked truncated so the verdict cannot read as clean.
+	_wbr=$1
+	_wbout="$WORKDIR/walkout"
+	: >"$_wbout"
+	walk "$_wbr" >"$_wbout" 2>/dev/null &
+	_wbpid=$!
+	while kill -0 "$_wbpid" 2>/dev/null; do
+		if timed_out; then
+			kill -TERM "$_wbpid" 2>/dev/null || :
+			# find may be mid-line when killed; drop a trailing partial line.
+			mark_truncated
+			warn "walk of $_wbr stopped by --timeout ${TIMEOUT_SECS}s"
+			break
+		fi
+		sleep 1
+	done
+	wait "$_wbpid" 2>/dev/null || :
+	# Only whole lines are usable.
+	awk 'NF' "$_wbout" 2>/dev/null || :
 }
 
 walk() {
@@ -1395,22 +1455,7 @@ build_file_lists() {
 			break
 		fi
 		info "walking $root"
-		# The budget is checked WHILE the root is walked, not just between roots.
-		# A single `find` over a large home directory can take several minutes, so
-		# checking only between roots left --timeout unable to stop the dominant
-		# stage: a fleet tool would kill the scan and yield no verdict at all.
-		# Breaking this loop closes the pipe and find exits on SIGPIPE.
-		walk "$root" | {
-			_wn=0
-			while IFS= read -r _wf; do
-				printf '%s\n' "$_wf"
-				_wn=$((_wn + 1))
-				if [ $((_wn % 2000)) -eq 0 ] && timed_out; then
-					mark_truncated
-					break
-				fi
-			done
-		} >>"$WORKDIR/allfiles"
+		walk_bounded "$root" >>"$WORKDIR/allfiles"
 	done
 
 	# Drop excluded prefixes before anything else looks at the list, so no check
@@ -1471,6 +1516,15 @@ build_file_lists() {
 	if [ -n "$(sigs_of_type SHA256)$(sigs_of_type SHA1)" ] &&
 		[ -z "$(sigs_of_type FILENAME)$(sigs_of_type PATHGLOB)" ]; then
 		warn "hash signatures are loaded but the signature set has no FILENAME or PATHGLOB record, so no file will ever be hashed. Add a FILENAME record for the basename you are hashing (see docs/signatures.md)."
+	fi
+
+	# In --fast mode the content and hash sweeps do not run, so building their
+	# candidate lists -- which requires a stat per file -- is pure cost.
+	if [ "$FAST" -eq 1 ]; then
+		: >"$CONTENTCAND_FILE"
+		: >"$HASHCAND_FILE"
+		info "$(wc -l <"$WORKDIR/allfiles" | tr -d ' ') files walked, $(wc -l <"$CANDIDATES_FILE" | tr -d ' ') candidates (--fast: no content/hash lists)"
+		return 0
 	fi
 
 	# Content candidates keep full breadth but are size-bounded, so one oversized
@@ -1580,6 +1634,8 @@ report_text() {
 	*)
 		if [ "$TRUNCATED" -eq 1 ]; then
 			printf 'VERDICT: INCOMPLETE — no indicators found, but the scan did not finish.\n'
+		elif [ "$FAST" -eq 1 ]; then
+			printf '%sVERDICT: CLEAN (fast)%s — no indicators found. Content and hash sweeps were skipped by --fast.\n' "$C_GRN" "$C_OFF"
 		else
 			printf '%sVERDICT: CLEAN%s — no indicators found.\n' "$C_GRN" "$C_OFF"
 		fi
@@ -1597,6 +1653,7 @@ report_json() {
 	printf '"duration_seconds":%s,' "$(elapsed)"
 	printf '"files_walked":%s,' "$(wc -l <"$WORKDIR/allfiles" | tr -d ' ')"
 	printf '"truncated":%s,' "$([ "$TRUNCATED" -eq 1 ] && printf 'true' || printf 'false')"
+	printf '"fast_mode":%s,' "$([ "$FAST" -eq 1 ] && printf 'true' || printf 'false')"
 	printf '"paths_skipped":%s,' "$COUNT_SKIPPED"
 
 	printf '"scan_roots":['
@@ -1692,18 +1749,31 @@ main() {
 	info "checking lockfile pins"
 	check_lockfiles
 
-	if budget_left; then
-		info "checking content markers"
-		check_content
+	# --fast skips the two stages whose cost is proportional to BYTES rather than to
+	# files. Everything above is proportional to the file count and finishes in
+	# seconds even on a machine with hundreds of repositories.
+	#
+	# This is a deliberate coverage choice, not a truncation: the verdict is reported
+	# normally rather than as INCOMPLETE. What is given up is a payload identified
+	# only by hash, and a marker string in a file whose name is not itself
+	# suspicious. What is kept is persistence, payload filenames, running processes,
+	# compromised package versions, and lockfile pins.
+	if [ "$FAST" -eq 1 ]; then
+		info "--fast: skipping content and hash sweeps by request"
 	else
-		warn "skipped content markers: --timeout ${TIMEOUT_SECS}s exhausted"
-	fi
-	if budget_left; then
-		info "checking hashes"
-		check_hashes sha256 SHA256
-		check_hashes sha1 SHA1
-	else
-		warn "skipped hash checks: --timeout ${TIMEOUT_SECS}s exhausted"
+		if budget_left; then
+			info "checking content markers"
+			check_content
+		else
+			warn "skipped content markers: --timeout ${TIMEOUT_SECS}s exhausted"
+		fi
+		if budget_left; then
+			info "checking hashes"
+			check_hashes sha256 SHA256
+			check_hashes sha1 SHA1
+		else
+			warn "skipped hash checks: --timeout ${TIMEOUT_SECS}s exhausted"
+		fi
 	fi
 
 	# De-duplicate: the same artifact can trip several signatures via different

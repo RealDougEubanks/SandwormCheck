@@ -40,6 +40,10 @@
     Wall-clock scan limit for the whole scan (10-86400, default 1800). Must match
     the sh scanner's default; tools/checks.sh asserts that they agree.
 
+.PARAMETER Fast
+    Skip the content and hash sweeps. Keeps every cheap high-signal check and
+    finishes in seconds even on a machine with hundreds of repositories.
+
 .PARAMETER Json
     Emit a single JSON object instead of the text report.
 
@@ -73,7 +77,12 @@ param(
 
     [long] $MaxFileSize = 8388608,
 
-    [int] $TimeoutSeconds = 1800,
+    [int] $TimeoutSeconds = 3600,
+
+    # Skips the content and hash sweeps: the two stages whose cost is proportional
+    # to BYTES rather than to file count. Deliberate coverage choice, not a
+    # truncation, so the verdict is reported normally.
+    [switch] $Fast,
 
     [switch] $Json,
 
@@ -1111,6 +1120,9 @@ function Write-TextReport {
         default {
             if ($script:Truncated) {
                 Write-Output 'VERDICT: INCOMPLETE - no indicators found, but the scan did not finish.'
+            } elseif ($Fast) {
+                $msg = 'VERDICT: CLEAN (fast) - no indicators found. Content and hash sweeps were skipped by -Fast.'
+                if ($useColor) { Write-Host $msg -ForegroundColor Green } else { Write-Output $msg }
             } else {
                 $msg = 'VERDICT: CLEAN - no indicators found.'
                 if ($useColor) { Write-Host $msg -ForegroundColor Green } else { Write-Output $msg }
@@ -1130,6 +1142,7 @@ function Write-JsonReport {
         duration_seconds = [int] $script:Stopwatch.Elapsed.TotalSeconds
         files_walked     = $script:FilesWalked
         truncated        = $script:Truncated
+        fast_mode        = [bool] $Fast
         paths_skipped    = $script:SkippedPaths.Count
         scan_roots       = @($Roots)
         campaigns        = @($script:Campaigns)
@@ -1234,9 +1247,13 @@ function Invoke-Main {
     Invoke-ProcessCheck -Signatures $signatures
     Invoke-PkgVerCheck -Signatures $signatures -AllFiles $allFilesArr
     Invoke-LockfileCheck -Signatures $signatures -AllFiles $allFilesArr
-    Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
-    Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
-    Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'
+    if ($Fast) {
+        Write-Diag '-Fast: skipping content and hash sweeps by request'
+    } else {
+        Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
+        Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
+        Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'
+    }
 
     # De-duplicate: the same artifact can trip several signatures via different
     # check types, and one line per (severity, id, path) is enough.

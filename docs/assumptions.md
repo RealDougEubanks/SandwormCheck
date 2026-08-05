@@ -667,3 +667,47 @@ the agent wins the race. The scanner runs its cheap high-signal checks first pre
 that a self-truncated scan is still useful.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** The walk bounds itself by running `find` in the background and killing it
+when the budget expires, rather than checking the budget between files.
+**Why:** Counting files cannot bound the walk: the shell is blocked reading `find`'s output
+and cannot evaluate anything until `find` yields. A 60s budget measured a 135s walk, 126%
+over, because `find` sat inside one slow subtree. Splitting the root by immediate child only
+reduced the variance -- a 20s budget then ran 89s when the first child was large. Backgrounding
+`find` and polling once a second gives a real ceiling: measured overshoot fell to 15-22%,
+which is now dominated by the other stages checking their budget between work chunks. A
+partial file list is kept, because a partial scan is worth checking and the run is marked
+truncated so the verdict cannot read as clean.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Scan roots and exclusions are converted to absolute paths at parse time,
+without resolving symlinks.
+**Why:** Exclusion prefixes are absolute, so a relative `--path` produced relative walked
+paths that no prefix could match. Running `./sandwormcheck.sh --path .` inside a checkout
+defeated self-exclusion entirely and the tool reported its own fixtures as a confirmed
+compromise again. The PowerShell port resolved paths to `FullName` and was unaffected, so the
+parity tests -- which compare findings between engines on absolute paths -- never surfaced it.
+Symlinks are deliberately *not* resolved, so a symlinked root is still reported under the name
+the operator gave. `.` and `./x` are special-cased, because a `/./` left in the result breaks
+prefix matching just as surely as a relative path does.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `--fast` skips the content and hash sweeps and reports a normal verdict
+rather than `INCOMPLETE`.
+**Why:** Those two stages scale with bytes; every other check scales with file count. On a
+developer machine with many repositories they are essentially the entire runtime -- 76s versus
+468s on the same tree. Reporting a deliberate coverage choice as an incomplete scan would
+conflate it with a truncation and make exit-code triage meaningless, so the verdict says
+`CLEAN (fast)` and the JSON carries `fast_mode`. The default timeout was raised to 3600s for
+the same reason: a full scan of such a machine measured 960s and the walk ceiling carries
+about 20% overshoot.
+**Recorded by:** Claude
+**Date:** 2026-08-05

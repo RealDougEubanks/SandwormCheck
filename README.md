@@ -156,6 +156,24 @@ Measured on a developer machine (414,000 files, 14 GB, ~4,000 installed packages
 
 - **~6.5 minutes** for a single large project tree (`--path ~/git`)
 - **~16 minutes** for a full default scan of every auto-detected root
+- **~1.3 minutes** for the same project tree with `--fast`
+
+Nearly all of that time is the content and hash sweeps, whose cost is proportional to
+**bytes** rather than files. `--fast` drops those two and keeps everything else: persistence
+paths, payload filenames and positions, running processes, compromised package versions, and
+lockfile pins. On a developer machine with hundreds of repositories that turns an eight-minute
+scan into about eighty seconds.
+
+What `--fast` gives up: a payload identified *only* by hash, and a marker string in a file
+whose name is not itself suspicious. It reports a normal verdict rather than `INCOMPLETE`,
+because skipping is a deliberate choice rather than a truncation.
+
+**Suggested fleet cadence for machines with many repositories**
+
+| When | Command | Time |
+|---|---|---|
+| Daily | `--fast` | seconds to a couple of minutes |
+| Weekly | full scan, generous `--timeout` | tens of minutes |
 
 Small trees finish in seconds. The default `--timeout` is 1800s to accommodate the second
 case; **size it below your fleet tool's own command timeout** so a slow host self-reports a
@@ -175,7 +193,9 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
                           directory and signature files are always excluded.
       --max-depth N       Directory depth limit (1-64, default 12)
       --max-file-size N   Skip larger files for hash/content checks (default 8 MiB)
-      --timeout N         Wall-clock limit for the whole scan (10-86400, default 1800)
+      --timeout N         Wall-clock limit for the whole scan (10-86400, default 3600)
+      --fast              Skip the content and hash sweeps; keeps every cheap
+                          high-signal check
       --json              Emit one JSON object instead of text
   -q, --quiet             Print only the verdict line
   -v, --verbose           Progress with elapsed seconds per stage, to stderr
@@ -185,8 +205,8 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
 ```
 
 The PowerShell port takes the same options in PowerShell form: `-SignaturePath`, `-Path`,
-`-Exclude`, `-MaxDepth`, `-MaxFileSize`, `-TimeoutSeconds`, `-Json`, `-Quiet`, `-Verbose`,
-`-NoColor`, `-Version`.
+`-Exclude`, `-MaxDepth`, `-MaxFileSize`, `-TimeoutSeconds`, `-Fast`, `-Json`, `-Quiet`,
+`-Verbose`, `-NoColor`, `-Version`.
 
 More examples, including JSON output and CI use, are in [docs/usage.md](docs/usage.md).
 

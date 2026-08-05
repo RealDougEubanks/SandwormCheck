@@ -41,7 +41,7 @@ without any preparation.
 README's shell snippet, and set the timeout below JumpCloud's own command timeout:
 
 ```sh
-sh "$DEST/sandwormcheck.sh" --timeout 1800
+sh "$DEST/sandwormcheck.sh" --timeout 3000
 ```
 
 Root matters. Home directories come from the OS user database, so every account is
@@ -152,7 +152,7 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 **cron**
 
 ```cron
-17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 1800 || logger -t sandwormcheck -p auth.warning "scan returned $?"
+17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 3000 || logger -t sandwormcheck -p auth.warning "scan returned $?"
 ```
 
 ## Operational notes

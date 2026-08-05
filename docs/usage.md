@@ -92,7 +92,13 @@ the payload is ~728 KB. Raise it only if you have a reason to.
 
 ### `--timeout N` / `-TimeoutSeconds N`
 
-Wall-clock ceiling for the whole scan, 10–86400, default 1800. On expiry the scanner reports what it found
+Wall-clock ceiling for the whole scan, 10–86400, default 3600.
+
+The walk stage is bounded by killing `find` when the budget expires, so the ceiling holds
+even inside a slow subtree. Measured overshoot is about 15–22%, because the remaining stages
+check the budget between work chunks rather than continuously. **Size this below any fleet
+agent's own command timeout**, with headroom for that overshoot: if the agent kills the
+process you get no verdict, whereas a self-truncated scan reports exit `1`. On expiry the scanner reports what it found
 and marks the run truncated. **A truncated scan that found nothing exits `1`, not `0`** —
 an incomplete scan is not a clean scan.
 
@@ -167,6 +173,24 @@ vendor advisory you saved.
 
 ```sh
 ./sandwormcheck.sh --exclude ~/git/SandwormCheck --exclude ~/Documents/incident-notes
+```
+
+### `--fast` / `-Fast`
+
+Skip the content and hash sweeps. Everything else runs.
+
+Those two stages scale with **bytes**; every other check scales with **file count**. On a
+developer machine with hundreds of repositories, `--fast` took 76s where a full scan took
+468s. Kept: persistence paths, payload filenames and positions, running processes,
+compromised package versions, lockfile pins. Given up: a payload identified only by hash, and
+a marker string inside a file whose name is not itself suspicious.
+
+It reports a normal verdict (`CLEAN (fast)`, `SUSPECT`, `CONFIRMED`) rather than
+`INCOMPLETE`, because skipping here is deliberate rather than a truncation.
+
+```sh
+sudo ./sandwormcheck.sh --fast          # daily sweep
+sudo ./sandwormcheck.sh --timeout 3000  # weekly, full coverage
 ```
 
 ### `-q`, `--quiet` / `-Quiet`

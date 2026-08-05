@@ -324,6 +324,34 @@ test_process_check() {
 	wait "$_g" 2>/dev/null || :
 }
 
+test_symlinked_root() {
+	section "symlinked scan root [$CURRENT_SHELL]"
+
+	# `find <symlink>` returns ZERO files without -H, so a symlinked scan root
+	# silently covered nothing and the scan reported CLEAN. On macOS /tmp is a
+	# symlink to private/tmp; a relocated home directory is often a symlink too.
+	# This was a false clean, the worst failure mode this tool has.
+	mkdir -p "$TMP/symreal/proj/node_modules/keyv"
+	printf 'inert fixture\n' >"$TMP/symreal/proj/node_modules/keyv/Math_Symbol.js"
+	printf '{"name":"keyv","version":"6.0.0"}\n' >"$TMP/symreal/proj/node_modules/keyv/package.json"
+	ln -sfn "$TMP/symreal" "$TMP/symlink-root"
+
+	run 20 "a planted payload is found via the real path" \
+		--path "$TMP/symreal" --signatures "$SIGS" --no-color
+	run 20 "the same payload is found via a SYMLINKED root" \
+		--path "$TMP/symlink-root" --signatures "$SIGS" --no-color
+	expect_out "Math_Symbol.js" "the finding is reported through the symlinked root"
+
+	# The other half: symlinks INSIDE the tree must NOT be followed. Following them
+	# would let a link pull the scan outside its root and allow cycles.
+	mkdir -p "$TMP/syminner/proj"
+	ln -sfn "$TMP/symreal" "$TMP/syminner/proj/points-at-payload"
+	ln -sfn "$TMP/syminner" "$TMP/syminner/proj/self-loop"
+	run 0 "a symlink inside the tree is not followed, and does not loop" \
+		--path "$TMP/syminner" --signatures "$SIGS" --no-color --timeout 60
+	refute_out "Math_Symbol.js" "the scan did not escape its root via an inner symlink"
+}
+
 test_signature_validation() {
 	section "signature validation [$CURRENT_SHELL]"
 
@@ -812,6 +840,7 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_true_negatives
 	test_lockfiles
 	test_process_check
+	test_symlinked_root
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

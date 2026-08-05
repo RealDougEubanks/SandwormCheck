@@ -254,6 +254,11 @@ disable it. Default scope:
   `$HOME` and root's home)
 - `/opt`, `/srv`, `/var/www`, `/usr/local/lib/node_modules`
 
+A scan root that is a **symlink is followed** (`find -H`); symlinks *inside* the tree are
+not. Following inner links would let one pull the scan outside its root and permit cycles.
+Without following the root, a symlinked path such as macOS's `/tmp` walks zero files and the
+scan reports clean.
+
 **Pruned unconditionally** — never descended into:
 `.git/objects`, `.Trash`, `Library/Caches`, `Library/CloudStorage`, `/System`,
 `/private/var/vm`, `/proc`, `/sys`, `/dev`, `/Volumes`, `/net`, snap/flatpak mounts.

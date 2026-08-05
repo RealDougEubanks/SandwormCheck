@@ -517,7 +517,13 @@ walk() {
 	case $_root in
 	/proc* | /sys* | /dev* | /Volumes* | /net* | /System*) return 0 ;;
 	esac
-	find "$_root" -maxdepth "$MAX_DEPTH" \
+	# -H follows a symlink given ON THE COMMAND LINE but not symlinks found inside
+	# the tree. Without it a symlinked root yields zero files and the scan reports
+	# CLEAN: /tmp is a symlink to private/tmp on macOS, and a relocated home
+	# directory is often a symlink too, so whole roots silently went unscanned.
+	# Symlinks *within* the tree stay unfollowed, which avoids cycles and stops a
+	# link from pulling the scan outside its root.
+	find -H "$_root" -maxdepth "$MAX_DEPTH" \
 		\( -name .git -o -name .Trash -o -name Caches \
 		-o -name CloudStorage -o -name .npm-cache \) -prune -o \
 		-type f -print 2>/dev/null || :

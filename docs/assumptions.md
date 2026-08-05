@@ -427,3 +427,15 @@ FILENAME/PATHGLOB to bring a file into scope), not of the host being scanned. Fo
 running the real deployment path against the public repository rather than a fixture.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+**Assumption:** The directory walk uses `find -H`, following a symlink given as a scan root
+but not symlinks encountered inside the tree.
+**Why:** `find <symlink>` returns zero files. Without `-H` a symlinked root was walked as
+nothing and the scan reported CLEAN — a false clean, the worst failure mode this tool has.
+It was not hypothetical: `/tmp` is a symlink to `private/tmp` on macOS, so `--path /tmp`
+scanned nothing, and a relocated or symlinked home directory would have silently gone
+uncovered across a fleet. Symlinks *within* the tree remain unfollowed on purpose: following
+them would let a link pull the scan outside its root and would allow cycles. Both halves are
+covered by tests.
+**Recorded by:** Claude
+**Date:** 2026-08-05

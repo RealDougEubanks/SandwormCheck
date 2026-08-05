@@ -1115,8 +1115,17 @@ build_file_lists() {
 	grep -Fs -f "$WORKDIR/namepat" "$CANDIDATES_FILE" 2>/dev/null |
 		size_filter | sort -u >"$HASHCAND_FILE" || :
 
-	if [ ! -s "$HASHCAND_FILE" ] && [ -n "$(sigs_of_type SHA256)$(sigs_of_type SHA1)" ]; then
-		warn "hash signatures are loaded but no file matched a FILENAME or PATHGLOB basename; hash checks will find nothing. Add a FILENAME record for the basename you are hashing (see docs/signatures.md)."
+	# Warn only about a SIGNATURE AUTHORING gap: hash records with no
+	# FILENAME/PATHGLOB signature to bring any file into the hash candidate set.
+	#
+	# The earlier condition tested whether the candidate list came out empty, which
+	# is the normal state of a clean host with no matching files. That fired on
+	# healthy machines and told operators "hash checks will find nothing", which
+	# reads as a broken tool. Coverage is a property of the signature set, not of
+	# the host being scanned.
+	if [ -n "$(sigs_of_type SHA256)$(sigs_of_type SHA1)" ] &&
+		[ -z "$(sigs_of_type FILENAME)$(sigs_of_type PATHGLOB)" ]; then
+		warn "hash signatures are loaded but the signature set has no FILENAME or PATHGLOB record, so no file will ever be hashed. Add a FILENAME record for the basename you are hashing (see docs/signatures.md)."
 	fi
 
 	# Content candidates keep full breadth but are size-bounded, so one oversized

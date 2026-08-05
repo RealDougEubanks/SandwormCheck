@@ -143,8 +143,22 @@ SHA256|CONFIRMED|TEST-H003|$_s256|Hash with no FILENAME record
 EOF
 		run 0 "hash record with no covering FILENAME finds nothing" \
 			--path "$TMP/hashfix" --signatures "$TMP/hash-nofn.conf" --no-color
-		expect_err "hash signatures are loaded but no file matched" \
-			"missing hash coverage is warned about, not silent"
+		expect_err "the signature set has no FILENAME or PATHGLOB record" \
+			"a signature-authoring coverage gap is warned about, not silent"
+
+		# The inverse, and the more important case for fleet use: a clean host with
+		# no matching files must produce NO warning. An earlier revision keyed the
+		# warning off an empty candidate list, so it fired on healthy machines and
+		# told operators "hash checks will find nothing" -- which reads as a broken
+		# tool and trains them to ignore real output.
+		mkdir -p "$TMP/nowarn"
+		"$CURRENT_SHELL" "$SCANNER" --path "$TMP/nowarn" --signatures "$SIGS" \
+			--quiet --no-color >"$TMP/out" 2>"$TMP/err"
+		if grep -qi 'warning' "$TMP/err"; then
+			no "a clean scan emits no spurious warning" "stderr: $(head -1 "$TMP/err")"
+		else
+			ok "a clean scan emits no spurious warning"
+		fi
 	else
 		printf '  skip hash checks (no hashing tool available)\n'
 	fi

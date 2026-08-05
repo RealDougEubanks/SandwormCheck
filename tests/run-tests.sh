@@ -714,6 +714,66 @@ test_investigation_artifacts() {
 	expect_err "CONTENT scope must be" "the error explains the expected form"
 }
 
+test_relative_path_exclusion() {
+	section "a relative --path still self-excludes [$CURRENT_SHELL]"
+
+	# Exclusion prefixes are absolute. A relative --path produced relative walked
+	# paths that no prefix could match, so running the scanner inside its own
+	# checkout with a relative path defeated self-exclusion and it reported its own
+	# fixtures as a confirmed compromise again. The PowerShell port resolved paths to
+	# FullName and was unaffected, so the parity tests did not surface it either.
+	( cd "$ROOT" && "$CURRENT_SHELL" ./sandwormcheck.sh \
+		--path tests/fixtures/confirmed --signatures signatures \
+		--quiet --no-color >"$TMP/out" 2>"$TMP/err" )
+	_rc=$?
+	if [ "$_rc" -eq 0 ]; then
+		ok "a relative --path inside the checkout is self-excluded"
+	else
+		no "a relative --path inside the checkout is self-excluded" "exit $_rc"
+	fi
+
+	# And a relative --exclude must work the same way.
+	mkdir -p "$TMP/relex/victim/node_modules/keyv"
+	make_payload "$TMP/relex/victim/node_modules/keyv/Math_Symbol.js"
+	printf '{"name":"keyv","version":"6.0.0"}\n' \
+		>"$TMP/relex/victim/node_modules/keyv/package.json"
+	run 20 "the payload is found without an exclude" \
+		--path "$TMP/relex" --signatures "$SIGS" --no-color
+	( cd "$TMP/relex" && "$CURRENT_SHELL" "$SCANNER" --path . --exclude victim \
+		--signatures "$SIGS" --quiet --no-color >"$TMP/out" 2>"$TMP/err" )
+	_rc=$?
+	if [ "$_rc" -eq 0 ]; then
+		ok "a relative --exclude is honoured"
+	else
+		no "a relative --exclude is honoured" "exit $_rc"
+	fi
+}
+
+test_fast_mode() {
+	section "--fast skips the byte-bound sweeps [$CURRENT_SHELL]"
+
+	# Developer machines with hundreds of repositories spend nearly all their scan
+	# time in the content and hash sweeps, whose cost is proportional to bytes rather
+	# than files. --fast drops those two and keeps everything else.
+	run 20 "--fast still reports a payload by name and position" \
+		--path "$FIX/confirmed" --signatures "$SIGS" --fast --no-color
+	expect_out "SH25-F001" "the payload filename check still runs"
+
+	run 10 "--fast still reports a compromised package version" \
+		--path "$FIX/suspect" --signatures "$SIGS" --fast --no-color
+
+	run 0 "--fast on a clean tree exits 0" \
+		--path "$FIX/clean" --signatures "$SIGS" --fast --no-color
+	# A deliberate coverage choice must not be reported as an unfinished scan.
+	refute_out "INCOMPLETE" "--fast is not reported as a truncated scan"
+	expect_out "CLEAN (fast)" "the verdict says the sweeps were skipped"
+
+	# The lockfile and process checks are file-count bound, so they must survive.
+	run 10 "--fast still reports lockfile pins" \
+		--path "$FIX/lockfile/npm3" --signatures "$SIGS" --fast --no-color
+	expect_out "pinned keyv@6.0.0" "lockfile pins are still detected"
+}
+
 test_signature_validation() {
 	section "signature validation [$CURRENT_SHELL]"
 
@@ -1208,6 +1268,8 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_payload_name_collision
 	test_glob_semantics
 	test_investigation_artifacts
+	test_relative_path_exclusion
+	test_fast_mode
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

@@ -640,3 +640,74 @@ a host where it was unset: `Join-Path $env:TEMP ...` yielded null and the downlo
 collapsed with a misleading "could not obtain SandwormCheck".
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** `tools/checks.sh` asserts that both engines share the same defaults.
+**Why:** The sh timeout default was raised from 900s to 1800s and the PowerShell default was
+left at 900. Every Windows host therefore ran a shorter budget than every Mac and Linux
+host, and a large Windows machine would truncate and report exit 1 where Unix completed
+cleanly. The parity tests compared verdicts, findings and exit codes, so they never noticed:
+the divergence was in a default, one layer below what they check. The new check reads
+`timeout`, `max-depth` and `max-file-size` from both sources and fails if any differ,
+verified by deliberately reintroducing the drift.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Exit codes other than 0, 1, 2, 10 and 20 are documented as externally
+imposed, and the scanner's `--timeout` is documented as needing to sit BELOW any fleet
+agent's own command timeout.
+**Why:** Windows hosts reported exit `124`, which this tool cannot produce. `124` is the
+conventional "timed out" status, so the agent's command timeout was firing first and killing
+the process — which yields no verdict at all, strictly worse than a self-reported truncation.
+Raising the scanner's own budget makes this worse rather than better, because it guarantees
+the agent wins the race. The scanner runs its cheap high-signal checks first precisely so
+that a self-truncated scan is still useful.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The walk bounds itself by running `find` in the background and killing it
+when the budget expires, rather than checking the budget between files.
+**Why:** Counting files cannot bound the walk: the shell is blocked reading `find`'s output
+and cannot evaluate anything until `find` yields. A 60s budget measured a 135s walk, 126%
+over, because `find` sat inside one slow subtree. Splitting the root by immediate child only
+reduced the variance -- a 20s budget then ran 89s when the first child was large. Backgrounding
+`find` and polling once a second gives a real ceiling: measured overshoot fell to 15-22%,
+which is now dominated by the other stages checking their budget between work chunks. A
+partial file list is kept, because a partial scan is worth checking and the run is marked
+truncated so the verdict cannot read as clean.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Scan roots and exclusions are converted to absolute paths at parse time,
+without resolving symlinks.
+**Why:** Exclusion prefixes are absolute, so a relative `--path` produced relative walked
+paths that no prefix could match. Running `./sandwormcheck.sh --path .` inside a checkout
+defeated self-exclusion entirely and the tool reported its own fixtures as a confirmed
+compromise again. The PowerShell port resolved paths to `FullName` and was unaffected, so the
+parity tests -- which compare findings between engines on absolute paths -- never surfaced it.
+Symlinks are deliberately *not* resolved, so a symlinked root is still reported under the name
+the operator gave. `.` and `./x` are special-cased, because a `/./` left in the result breaks
+prefix matching just as surely as a relative path does.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `--fast` skips the content and hash sweeps and reports a normal verdict
+rather than `INCOMPLETE`.
+**Why:** Those two stages scale with bytes; every other check scales with file count. On a
+developer machine with many repositories they are essentially the entire runtime -- 76s versus
+468s on the same tree. Reporting a deliberate coverage choice as an incomplete scan would
+conflate it with a truncation and make exit-code triage meaningless, so the verdict says
+`CLEAN (fast)` and the JSON carries `fast_mode`. The default timeout was raised to 3600s for
+the same reason: a full scan of such a machine measured 960s and the walk ceiling carries
+about 20% overshoot.
+**Recorded by:** Claude
+**Date:** 2026-08-05

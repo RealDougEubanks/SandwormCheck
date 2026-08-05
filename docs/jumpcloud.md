@@ -14,6 +14,8 @@ Point your alerting at the code, not the text output.
 | `20` | **Confirmed** | **Urgent** | Payload, persistence, or exfil artifact present. Isolate the host and rotate every credential it touched. See [remediation.md](remediation.md). |
 | `1` | Scanner error | Normal | The scan did not complete, or a signature file is malformed. **Do not read this as clean.** Check stderr. |
 | `2` | Usage error | Low | The command is wrong. Fix the policy. |
+| `124` | **Killed by the agent's command timeout** — not a SandwormCheck code | Normal | You have no verdict for this host. Lower `--timeout` below the agent's limit, or narrow the scan with `--path`. |
+| `137`, `143` | Killed (`SIGKILL` / `SIGTERM`) | Normal | Same: no verdict. Check for an agent limit or a memory/policy kill. |
 
 A JumpCloud policy that alerts on any non-zero result is correct by default: `1` and `2`
 both mean "you don't have an answer for this host yet," which is exactly what you want
@@ -39,7 +41,7 @@ without any preparation.
 README's shell snippet, and set the timeout below JumpCloud's own command timeout:
 
 ```sh
-sh "$DEST/sandwormcheck.sh" --timeout 1500
+sh "$DEST/sandwormcheck.sh" --timeout 3000
 ```
 
 Root matters. Home directories come from the OS user database, so every account is
@@ -150,7 +152,7 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 **cron**
 
 ```cron
-17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 900 || logger -t sandwormcheck -p auth.warning "scan returned $?"
+17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 3000 || logger -t sandwormcheck -p auth.warning "scan returned $?"
 ```
 
 ## Operational notes
@@ -158,8 +160,32 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 - **Run as root / SYSTEM.** Unprivileged runs only cover what the invoking user can read.
   The scanner reports how many paths it had to skip, so an under-privileged run is
   visible rather than silently narrow — but you still want full coverage.
-- **Budget the timeout.** 600s suits most laptops. Build agents with large caches may
-  need more; the default 900s is the ceiling for a reason.
+- **A 124 means the agent killed the scan.** SandwormCheck only ever exits 0, 1, 2, 10, or
+20. Anything else came from outside it. `124` is the conventional "timed out" status, so it
+means the agent's command timeout fired before the scanner finished — and you get **no
+verdict**, which is strictly worse than a truncated one.
+
+Fix it by making the scanner stop first:
+
+1. Find the agent's command timeout for that policy.
+2. Set `--timeout` / `-TimeoutSeconds` comfortably below it (leave 10-20% headroom, since
+   the budget is a soft ceiling checked between work chunks).
+3. If even that is too short for a full scan, narrow the scope instead of raising the
+   budget: `--path C:\Users --path C:\projects` on Windows, or scan developer machines on
+   a longer schedule than servers.
+
+A self-truncated scan reports exit `1` and still covers the cheap high-signal checks --
+persistence paths, payload filenames, running processes, package versions and lockfile pins.
+Only the content and hash sweeps are dropped.
+
+**Budget the timeout.** 600s suits most laptops. Build agents with large caches may
+  need more. The default is 1800s, because a full scan of a developer machine measured
+  960s and a 900s budget truncated it.
+
+  **Keep the scanner's `--timeout` below JumpCloud's own command timeout.** If the agent
+  kills the process you get no verdict at all; if the scanner stops itself you get exit
+  `1`, which means "no answer yet" and is triageable. Check the agent's limit and leave
+  headroom.
 - **Nothing is written to the scanned host** except what you redirect yourself. The
   scanner's own temp directory is removed on exit, including on error paths.
 - **No credentials appear in command logs.** Findings are paths and signature IDs only —

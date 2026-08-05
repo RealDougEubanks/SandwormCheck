@@ -68,6 +68,22 @@ locations are covered — including macOS's root account, whose home is `/var/ro
 | `20` | **Confirmed** — payload, persistence, or exfiltration artifact found | Treat the host as compromised: isolate it and rotate its credentials |
 | `1` | Scanner error — bad signature file, or the scan did not finish | Fix and re-run. **This is not a clean result.** |
 | `2` | Usage error — bad flag or argument | Fix the invocation |
+| `124`, `137`, `143` | **Not produced by this tool.** Something killed the process — usually a fleet agent's own command timeout (`124`), or `SIGKILL`/`SIGTERM` | Lower `--timeout` **below** the agent's limit, or narrow the scan with `--path`. See below. |
+
+### Why the scanner's timeout must be *below* the agent's
+
+If the agent kills the process you get **no verdict at all**. If the scanner stops
+itself you get exit `1`, meaning "no answer yet", which is triageable:
+
+```
+agent limit 600s, scanner --timeout 1800  ->  killed at 600s   ->  124, nothing
+agent limit 600s, scanner --timeout 540   ->  stops itself     ->  1, plus findings so far
+```
+
+Raising the scanner's timeout above the agent's guarantees the agent wins the race. A
+truncated scan still runs the cheap, high-signal checks first — persistence paths,
+filenames, running processes, package versions, lockfiles — and only skips the expensive
+content and hash sweeps, so a self-truncated scan is far from worthless.
 
 The distinction between `10` and `20` is the useful part at fleet scale. A `10` is a
 Monday-morning dependency bump. A `20` means someone's npm and cloud credentials are
@@ -140,6 +156,24 @@ Measured on a developer machine (414,000 files, 14 GB, ~4,000 installed packages
 
 - **~6.5 minutes** for a single large project tree (`--path ~/git`)
 - **~16 minutes** for a full default scan of every auto-detected root
+- **~1.3 minutes** for the same project tree with `--fast`
+
+Nearly all of that time is the content and hash sweeps, whose cost is proportional to
+**bytes** rather than files. `--fast` drops those two and keeps everything else: persistence
+paths, payload filenames and positions, running processes, compromised package versions, and
+lockfile pins. On a developer machine with hundreds of repositories that turns an eight-minute
+scan into about eighty seconds.
+
+What `--fast` gives up: a payload identified *only* by hash, and a marker string in a file
+whose name is not itself suspicious. It reports a normal verdict rather than `INCOMPLETE`,
+because skipping is a deliberate choice rather than a truncation.
+
+**Suggested fleet cadence for machines with many repositories**
+
+| When | Command | Time |
+|---|---|---|
+| Daily | `--fast` | seconds to a couple of minutes |
+| Weekly | full scan, generous `--timeout` | tens of minutes |
 
 Small trees finish in seconds. The default `--timeout` is 1800s to accommodate the second
 case; **size it below your fleet tool's own command timeout** so a slow host self-reports a
@@ -159,7 +193,9 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
                           directory and signature files are always excluded.
       --max-depth N       Directory depth limit (1-64, default 12)
       --max-file-size N   Skip larger files for hash/content checks (default 8 MiB)
-      --timeout N         Wall-clock limit for the whole scan (10-86400, default 1800)
+      --timeout N         Wall-clock limit for the whole scan (10-86400, default 3600)
+      --fast              Skip the content and hash sweeps; keeps every cheap
+                          high-signal check
       --json              Emit one JSON object instead of text
   -q, --quiet             Print only the verdict line
   -v, --verbose           Progress with elapsed seconds per stage, to stderr
@@ -169,8 +205,8 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
 ```
 
 The PowerShell port takes the same options in PowerShell form: `-SignaturePath`, `-Path`,
-`-Exclude`, `-MaxDepth`, `-MaxFileSize`, `-TimeoutSeconds`, `-Json`, `-Quiet`, `-Verbose`,
-`-NoColor`, `-Version`.
+`-Exclude`, `-MaxDepth`, `-MaxFileSize`, `-TimeoutSeconds`, `-Fast`, `-Json`, `-Quiet`,
+`-Verbose`, `-NoColor`, `-Version`.
 
 More examples, including JSON output and CI use, are in [docs/usage.md](docs/usage.md).
 
@@ -239,7 +275,7 @@ fi
 }
 [ "$updated" -eq 1 ] || echo "WARNING: update failed; scanning with the existing copy" >&2
 
-sh "$DEST/sandwormcheck.sh" --timeout 1500
+sh "$DEST/sandwormcheck.sh" --timeout 1800
 ```
 
 ### Windows
@@ -310,7 +346,7 @@ if (-not $updated) {
 # Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
 # would report this host as clean when it was never scanned.
 $global:LASTEXITCODE = $null
-& $scanner -TimeoutSeconds 1500
+& $scanner -TimeoutSeconds 1800
 if ($null -eq $LASTEXITCODE) {
     [Console]::Error.WriteLine('scanner produced no exit code'); exit 1
 }

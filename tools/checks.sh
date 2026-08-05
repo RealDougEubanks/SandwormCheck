@@ -178,6 +178,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The two engines must agree on every default, not only on findings. The parity
+# tests compared verdicts and exit codes, so a drifted default went unnoticed: the
+# sh timeout was raised to 1800s while PowerShell stayed at 900, meaning every
+# Windows host ran a shorter budget and a large machine would truncate there while
+# completing on Unix. Same class of silent divergence, one layer down.
+head_ "scanner defaults agree"
+if [ -f sandwormcheck.sh ] && [ -f SandwormCheck.ps1 ]; then
+	_sh_to=$(sed -n 's/^TIMEOUT_SECS=\([0-9]*\).*/\1/p' sandwormcheck.sh | head -1)
+	_ps_to=$(sed -n 's/.*TimeoutSeconds = \([0-9]*\).*/\1/p' SandwormCheck.ps1 | head -1)
+	_sh_md=$(sed -n 's/^MAX_DEPTH=\([0-9]*\).*/\1/p' sandwormcheck.sh | head -1)
+	_ps_md=$(sed -n 's/.*MaxDepth = \([0-9]*\).*/\1/p' SandwormCheck.ps1 | head -1)
+	_sh_fs=$(sed -n 's/^MAX_FILE_SIZE=\([0-9]*\).*/\1/p' sandwormcheck.sh | head -1)
+	_ps_fs=$(sed -n 's/.*MaxFileSize = \([0-9]*\).*/\1/p' SandwormCheck.ps1 | head -1)
+	_dbad=0
+	for _pair in "timeout:${_sh_to:-?}:${_ps_to:-?}" \
+		"max-depth:${_sh_md:-?}:${_ps_md:-?}" \
+		"max-file-size:${_sh_fs:-?}:${_ps_fs:-?}"; do
+		_dn=${_pair%%:*}
+		_drest=${_pair#*:}
+		_da=${_drest%%:*}
+		_db=${_drest#*:}
+		if [ "$_da" = "?" ] || [ "$_db" = "?" ]; then
+			printf '    %s: could not read a default (sh=%s ps1=%s)\n' "$_dn" "$_da" "$_db"
+			_dbad=1
+		elif [ "$_da" != "$_db" ]; then
+			printf '    %s: sh=%s but ps1=%s\n' "$_dn" "$_da" "$_db"
+			_dbad=1
+		fi
+	done
+	if [ "$_dbad" -eq 0 ]; then
+		pass "timeout=$_sh_to, max-depth=$_sh_md, max-file-size=$_sh_fs in both engines"
+	else
+		fail "the scanners disagree on a default"
+	fi
+else
+	skip "one or both scanners not present"
+fi
+
+# ---------------------------------------------------------------------------
 # A signature file that fails to load makes every scan exit 1. Catching it here
 # is much cheaper than catching it on a fleet.
 head_ "signature files load"

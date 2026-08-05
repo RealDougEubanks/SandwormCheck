@@ -96,6 +96,18 @@ jobs:
           if ($bad) { Write-Host "non-ASCII in: $($bad -join ', ')"; exit 1 }
           Write-Host 'ok: pure ASCII'
 
+      # The scanner excludes its own install directory, and tests/fixtures lives
+      # inside it. Scanning the fixtures in place would test nothing, so they are
+      # copied out first -- the same reason tests/run-tests.sh copies them.
+      - name: Stage fixtures outside the repository
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'fixtures'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Copy-Item -Recurse tests/fixtures $dest
+          "FIXTURES=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "staged at $dest"
+
       - name: Verdict tiers and exit codes
         shell: pwsh
         run: |
@@ -113,7 +125,7 @@ jobs:
           )
           $failed = $false
           foreach ($c in $cases) {
-            & ./SandwormCheck.ps1 -Path "tests/fixtures/$($c.Tree)" -SignaturePath signatures -NoColor -Quiet
+            & ./SandwormCheck.ps1 -Path (Join-Path $env:FIXTURES $c.Tree) -SignaturePath signatures -NoColor -Quiet
             if ($LASTEXITCODE -ne $c.Expect) {
               Write-Host "FAIL $($c.Tree): expected $($c.Expect), got $LASTEXITCODE"
               $failed = $true
@@ -132,7 +144,7 @@ jobs:
         shell: pwsh
         run: |
           "#!campaign t`nBOGUS|CONFIRMED|X-1|foo|desc" | Set-Content bad.conf
-          & ./SandwormCheck.ps1 -Path tests/fixtures/clean -SignaturePath bad.conf
+          & ./SandwormCheck.ps1 -Path (Join-Path $env:FIXTURES 'clean') -SignaturePath bad.conf
           if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: expected 1, got $LASTEXITCODE"; exit 1 }
           Write-Host 'ok   malformed signature -> 1'
           exit 0
@@ -140,7 +152,7 @@ jobs:
       - name: JSON output is valid and schema-versioned
         shell: pwsh
         run: |
-          $out = & ./SandwormCheck.ps1 -Path tests/fixtures/confirmed -SignaturePath signatures -Json
+          $out = & ./SandwormCheck.ps1 -Path (Join-Path $env:FIXTURES 'confirmed') -SignaturePath signatures -Json
           $code = $LASTEXITCODE
           $d = $out | ConvertFrom-Json
           if ($d.schema -ne 'sandwormcheck/v1') { Write-Host "FAIL: bad schema $($d.schema)"; exit 1 }

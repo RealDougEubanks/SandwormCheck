@@ -369,12 +369,17 @@ test_symlinked_root() {
 }
 
 test_timeout_bounds_whole_scan() {
-	section "--timeout bounds the whole scan [$CURRENT_SHELL]"
+	section "--timeout bounds the whole scan"
 
-	# The budget was once checked only while walking directories, so the content
-	# sweep -- by far the longest stage -- ran unbounded. A fleet tool would then
-	# kill the scan mid-check and the operator would get no verdict at all, which is
-	# worse than a reported truncation.
+	# The budget was once checked only between roots, so the walk and the content
+	# sweep ran unbounded: a 20s budget produced a 400s scan. A fleet tool would
+	# then kill the scan mid-run and the operator would get no verdict at all,
+	# which is worse than a reported truncation.
+	#
+	# Whether a 20s budget actually truncates depends on the machine: a developer
+	# home directory has hundreds of thousands of files, a CI runner does not. The
+	# assertions are therefore conditional on truncation having occurred, rather
+	# than assuming a slow host and failing spuriously on a fast one.
 	if [ ! -d "$HOME" ]; then
 		printf '  skip (no HOME to scan)\n'
 		return 0
@@ -386,25 +391,30 @@ test_timeout_bounds_whole_scan() {
 	_rc=$?
 	_el=$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))
 
-	# Soft ceiling: overshoot of up to one chunk or one root is expected. Allow a
-	# generous multiple, since the point is that it stops rather than runs forever.
-	if [ "$_el" -lt 240 ]; then
-		ok "a 20s budget stopped the scan in ${_el}s rather than running to completion"
-	else
-		no "a 20s budget bounds the scan" "took ${_el}s"
-	fi
-
 	if grep -qiE 'truncat' "$TMP/out"; then
-		ok "the report says the scan was truncated"
+		ok "a 20s budget truncated the scan and said so (${_el}s)"
+		# Soft ceiling: overshoot of up to one chunk or one root is expected. The
+		# point is that it stops rather than running to completion.
+		if [ "$_el" -lt 180 ]; then
+			ok "the truncated scan stopped promptly (${_el}s for a 20s budget)"
+		else
+			no "the truncated scan stopped promptly" "took ${_el}s for a 20s budget"
+		fi
+		# An incomplete scan must never look like a clean bill of health.
+		if [ "$_rc" -eq 0 ]; then
+			no "a truncated scan does not exit 0" "exit was 0, which reads as clean"
+		else
+			ok "a truncated scan does not exit 0 (exit $_rc)"
+		fi
 	else
-		no "the report says the scan was truncated" "no truncation notice in stdout"
+		# The host finished inside the budget, which is a valid outcome.
+		printf '  skip (HOME scanned fully within 20s on this host; nothing to truncate)\n'
+		if [ "$_el" -lt 180 ]; then
+			ok "an untruncated scan completed within the budget (${_el}s)"
+		else
+			no "an untruncated scan completed within the budget" "took ${_el}s but claimed no truncation"
+		fi
 	fi
-
-	# An incomplete scan must never look like a clean bill of health.
-	case $_rc in
-	0) no "a truncated scan does not exit 0" "exit was 0, which reads as clean" ;;
-	*) ok "a truncated scan does not exit 0 (exit $_rc)" ;;
-	esac
 }
 
 test_self_exclusion() {

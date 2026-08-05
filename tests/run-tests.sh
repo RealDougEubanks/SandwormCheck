@@ -34,9 +34,10 @@ FIX="$TMP/fixtures"
 # The committed payload fixtures are placeholders a few bytes long, so the
 # repository stays small and holds nothing resembling a real payload. Pad them in
 # the copy so the size floor in the payload signatures is actually exercised.
+# Pad the payload fixture past the size floor while KEEPING its marker strings, so
+# the content signatures still see them where a real bundle would carry them.
 _pf="$FIX/confirmed/proj/node_modules/keyv/Math_Symbol.js"
 if [ -f "$_pf" ]; then
-	: >"$_pf"
 	_pi=0
 	while [ "$_pi" -lt 200 ]; do
 		printf '%0768d\n' 0 >>"$_pf"
@@ -70,7 +71,8 @@ make_payload() {
 	# been detected on a real host either.
 	_mp=$1
 	mkdir -p "$(dirname "$_mp")"
-	: >"$_mp"
+	# Marker strings embedded as the real bundle carries them.
+	printf '// Shai-Hulud: Here We Go Again\n// npm-cache.com\n' >"$_mp"
 	_mpi=0
 	while [ "$_mpi" -lt 200 ]; do
 		printf '%0768d\n' 0 >>"$_mp"
@@ -151,7 +153,7 @@ test_check_types() {
 	expect_out "SH25-F001" "PATHGLOB detects the payload at a package root"
 	expect_out "SH25-R001" "PATHGLOB detects .claude/setup.mjs"
 	expect_out "SH25-R002" "PATHGLOB detects .vscode/setup.mjs"
-	expect_out "SH25-M001" "CONTENT detects the Shai-Hulud exfil marker"
+	expect_out "SH25-M001" "CONTENT detects the exfil marker inside the payload bundle"
 	expect_out "SH25-N001" "CONTENT detects the npm-cache.com C2 domain"
 	# Assert on the name@version in the detail text, not the signature ID: IDs in
 	# the generated package file are hash-derived and would churn on regeneration.
@@ -662,6 +664,56 @@ EOF
 	expect_err "size floor must be" "the error explains the expected form"
 }
 
+test_investigation_artifacts() {
+	section "investigating the campaign must not look like the campaign [$CURRENT_SHELL]"
+
+	# From a live fleet report: two CONFIRMED findings on
+	# ~/.claude/projects/*.jsonl -- an AI assistant transcript from a user asking
+	# whether they were infected. The act of investigating produced the evidence.
+	#
+	# The class is broad. Every one of these holds the marker strings and every one
+	# was reported as a CONFIRMED COMPROMISE before CONTENT signatures were scoped.
+	mkdir -p "$TMP/records/proj/node_modules/x"
+	printf '{"name":"x","version":"1.0.0"}\n' >"$TMP/records/proj/node_modules/x/package.json"
+
+	# 1. This scanner's own --json report, which the docs tell operators to save.
+	"$CURRENT_SHELL" "$SCANNER" --path "$FIX/confirmed" --signatures "$SIGS" --json \
+		>"$TMP/records/proj/node_modules/x/scan-report.json" 2>/dev/null || :
+	# 2. An assistant transcript.
+	mkdir -p "$TMP/records/proj/.claude/projects"
+	printf '{"role":"user","content":"am I infected? check gh-token-monitor and math_init"}\n' \
+		>"$TMP/records/proj/.claude/projects/session.jsonl"
+	# 3. Shell history from the investigation.
+	printf 'grep -r Math_Symbol.js /\nls ~/.config/gh-token-monitor\ncurl npm-cache.com\n' \
+		>"$TMP/records/proj/node_modules/x/history.log"
+	# 4. Incident notes and a saved advisory.
+	printf '# Notes\nCampaign: Shai-Hulud: Here We Go Again\nC2: npm-cache.com\n' \
+		>"$TMP/records/proj/node_modules/x/incident-notes.md"
+	printf 'The worm drops Math_Symbol.js and installs gh-token-monitor.\n' \
+		>"$TMP/records/proj/node_modules/x/advisory.txt"
+
+	run 0 "records of an investigation are not reported as a compromise" \
+		--path "$TMP/records" --signatures "$SIGS" --no-color
+	refute_out "scan-report.json" "the scanner does not flag its own JSON report"
+	refute_out "session.jsonl" "an assistant transcript is not flagged"
+	refute_out "history.log" "shell history is not flagged"
+	refute_out "incident-notes.md" "incident notes are not flagged"
+	refute_out "advisory.txt" "a saved advisory is not flagged"
+
+	# The inverse: the same strings in the places a payload actually puts them.
+	run 20 "the same strings in an IDE config and a payload ARE reported" \
+		--path "$FIX/confirmed" --signatures "$SIGS" --no-color
+	expect_out "SH25-R003" "math_init in an IDE config is still detected"
+	expect_out "SH25-M001" "the exfil marker inside the payload bundle is still detected"
+
+	# A malformed scope must be rejected, not silently treated as unscoped.
+	printf '#!campaign t\nCONTENT|CONFIRMED|C-BAD|[**/x.js broken|unclosed scope\n' \
+		>"$TMP/badscope.conf"
+	run 1 "an unclosed CONTENT scope is a hard error" \
+		--path "$TMP/records" --signatures "$TMP/badscope.conf"
+	expect_err "CONTENT scope must be" "the error explains the expected form"
+}
+
 test_signature_validation() {
 	section "signature validation [$CURRENT_SHELL]"
 
@@ -1155,6 +1207,7 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_multi_user_coverage
 	test_payload_name_collision
 	test_glob_semantics
+	test_investigation_artifacts
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

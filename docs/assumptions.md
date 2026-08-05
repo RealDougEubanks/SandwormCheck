@@ -581,3 +581,37 @@ something the scanner would detect on a real host. Padding in the copy keeps the
 small while exercising the real threshold.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** Every shipped `CONTENT` signature carries a path scope, and the check type
+supports one.
+**Why:** A live fleet report contained two `CONFIRMED` findings on
+`~/.claude/projects/*.jsonl` — an assistant transcript from a user asking whether they were
+infected. The act of investigating produced the evidence. Testing the class showed it was
+far broader than transcripts: shell history, incident notes, a saved advisory, and **the
+scanner's own `--json` report** were all reported as a confirmed compromise. The last is the
+worst, because the documentation instructs operators to write that report to disk, so the
+tool manufactured evidence against itself on the next run.
+
+Pruning `.claude/projects` would have fixed one symptom and left the class intact. Scoping
+addresses the cause: a string match cannot tell an infection from a description of one, so
+the signature must say where the artifact would actually live. The shipped descriptions
+already claimed a scope — "in a config or unit file", "inside an IDE config or package
+manifest" — and the implementation ignored it.
+
+Accepted residual: a code file that deliberately contains a marker string still matches.
+That is a far narrower surface than every file on disk, and it is documented.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The payload fixture embeds the marker strings inside the bundle rather than
+in a loose `marker.txt`.
+**Why:** Scoping `SH25-M001` to code files correctly stopped matching `marker.txt`, which
+revealed the fixture was never realistic. Wiz reports that string as the exfiltration
+repository *description*; on disk it appears inside the payload bundle. A fixture that only
+passes because a check is over-broad is not evidence the check works.
+**Recorded by:** Claude
+**Date:** 2026-08-05

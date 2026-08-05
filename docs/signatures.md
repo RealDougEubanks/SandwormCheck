@@ -167,6 +167,34 @@ Literal substring, not regex — `grep -F` on Unix, ordinal `IndexOf` on Windows
 regex out avoids the dialect differences between `grep` and .NET that would make one
 engine match where the other does not.
 
+**Always give a CONTENT signature a path scope.** Prefix the pattern with
+`[glob,glob] ` to restrict which files are searched:
+
+```
+CONTENT|CONFIRMED|EX-010|[**/settings.json,**/tasks.json] math_init|Payload in an IDE hook
+CONTENT|CONFIRMED|EX-011|[**/*.js,**/*.mjs] evil-c2.example|C2 domain in code
+```
+
+An unscoped CONTENT signature is close to unusable, because **a string match cannot tell
+an infection from a description of one.** Everything that records an investigation contains
+the marker strings:
+
+- AI assistant transcripts (`~/.claude/projects/*.jsonl`)
+- shell history, terminal logs
+- incident notes, tickets, a saved vendor advisory
+- **this scanner's own `--json` report**, which the documentation tells operators to write
+  to disk
+
+Every one of those was reported as `CONFIRMED COMPROMISE` on a real host. A user asked an
+assistant whether they were infected, and the transcript of that question became the
+evidence. Scope to the files where the artifact would actually live — for this campaign,
+IDE configs, package manifests, unit files, and code — not to `.jsonl`, `.log`, `.md`, or
+`.txt`.
+
+Residual, and worth stating: a **code** file that deliberately contains a marker string
+still matches. Someone pasting a payload sample into `notes.js` will be flagged. That is a
+narrower and more defensible surface than matching every file on the disk.
+
 Only *candidate* files are searched (see below), and only files under `--max-file-size`.
 
 ## What gets searched

@@ -545,11 +545,45 @@ function Invoke-HashCheck {
     }
 }
 
+function Split-ContentScope {
+    param([string] $Pattern)
+    # "[glob,glob] pattern" restricts a CONTENT match to matching paths.
+    #
+    # A bare string match cannot tell an infection from a description of one.
+    # Investigating the campaign produces artifacts holding every marker string:
+    # assistant transcripts, shell history, incident notes, a saved advisory, and
+    # this scanner's own --json report. All were reported as CONFIRMED COMPROMISE
+    # before scoping.
+    if ($Pattern.StartsWith('[')) {
+        $close = $Pattern.IndexOf('] ')
+        if ($close -gt 1) {
+            $globs = $Pattern.Substring(1, $close - 1)
+            $rest = $Pattern.Substring($close + 2)
+            $rx = @()
+            foreach ($g in ($globs -split ',')) {
+                $g = $g.Trim()
+                if ($g) { $rx += (Convert-GlobToRegex $g) }
+            }
+            return @{ Pattern = $rest; Scopes = $rx }
+        }
+    }
+    return @{ Pattern = $Pattern; Scopes = @() }
+}
+
 function Invoke-ContentCheck {
     param([object[]] $Signatures, [string[]] $Candidates)
 
     $sigs = @($Signatures | Where-Object { $_.Type -eq 'CONTENT' })
     if ($sigs.Count -eq 0) { return }
+
+    $compiled = foreach ($sig in $sigs) {
+        $sc = Split-ContentScope $sig.Pattern
+        [PSCustomObject]@{
+            Sig     = $sig
+            Needle  = $sc.Pattern
+            Scopes  = @(foreach ($r in $sc.Scopes) { [regex]::new($r, 'IgnoreCase') })
+        }
+    }
 
     foreach ($file in $Candidates) {
         try {
@@ -560,12 +594,20 @@ function Invoke-ContentCheck {
             Write-Diag "content skipped for ${file}: $($_.Exception.Message)"
             continue
         }
-        foreach ($sig in $sigs) {
-            # Ordinal literal comparison: no regex dialect surprises, and it
-            # matches the -F semantics of the sh implementation.
-            if ($text.IndexOf($sig.Pattern, [StringComparison]::Ordinal) -ge 0) {
-                Add-Finding $sig.Severity $sig.Id $file 'content match' $sig.Description
+        $norm = $file -replace '\\', '/'
+        foreach ($c in $compiled) {
+            # Ordinal literal comparison: no regex dialect surprises, and it matches
+            # the -F semantics of the sh implementation.
+            if ($text.IndexOf($c.Needle, [StringComparison]::Ordinal) -lt 0) { continue }
+            if ($c.Scopes.Count -gt 0) {
+                $inScope = $false
+                foreach ($r in $c.Scopes) { if ($r.IsMatch($norm)) { $inScope = $true; break } }
+                if (-not $inScope) {
+                    Write-Diag "out of scope: $file for $($c.Sig.Id)"
+                    continue
+                }
             }
+            Add-Finding $c.Sig.Severity $c.Sig.Id $file 'content match' $c.Sig.Description
         }
     }
 }

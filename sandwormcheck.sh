@@ -581,6 +581,10 @@ load_signatures() {
 					if (pat !~ /^[0-9a-fA-F]{40}$/)
 						fail(FNR, id ": SHA1 must be 40 hex characters, got " length(pat))
 					pat = tolower(pat)
+				} else if (type == "CONTENT") {
+					# An optional "[glob,glob] " scope prefix must be closed.
+					if (substr(pat, 1, 1) == "[" && index(pat, "] ") < 2)
+						fail(FNR, id ": CONTENT scope must be \x27[glob,glob] <string>\x27")
 				} else if (type == "PATHGLOB" || type == "FILENAME") {
 					# An optional ">=N " size floor must be well formed if present.
 					if (pat ~ /^>=/ && pat !~ /^>=[0-9]+ ./)
@@ -930,37 +934,71 @@ check_hashes() {
 }
 
 check_content() {
-	# One batched grep over many files at a time rather than a grep per pattern
-	# per file. The per-file form costs (patterns + 1) processes for every
-	# candidate, which on a real dependency tree is hundreds of thousands of
-	# processes and takes minutes.
+	# Two stages: a batched grep -l sweep to find candidate files, then -o only on
+	# those to learn which pattern hit. See docs/spec.md.
+	#
+	# A CONTENT pattern may carry a PATH SCOPE: "[glob,glob] pattern" restricts the
+	# match to files whose path matches one of the globs.
+	#
+	# Scope exists because a bare string match cannot tell an infection from a
+	# description of one. Investigating the campaign creates artifacts that contain
+	# every marker string: AI assistant transcripts, shell history, incident notes,
+	# a saved vendor advisory -- and this scanner's own --json report, which the
+	# documentation tells operators to write to disk. All of those were reported as
+	# CONFIRMED COMPROMISE. The signature descriptions already said "in a config or
+	# unit file"; the implementation simply did not honour it.
 	_sigs=$(sigs_of_type CONTENT)
 	[ -n "$_sigs" ] || return 0
 	[ -s "$CONTENTCAND_FILE" ] || return 0
 
-	# Literal patterns for the batched pass, plus a pattern -> signature map.
+	# Literal patterns for the sweep, plus a pattern -> signature+scope map.
 	: >"$WORKDIR/cpat"
 	: >"$WORKDIR/cmap"
-	printf '%s\n' "$_sigs" | while IFS='|' read -r _t _sev _id _pat _desc; do
-		[ -n "$_id" ] || continue
-		printf '%s\n' "$_pat" >>"$WORKDIR/cpat"
-		printf '%s\t%s|%s|%s\n' "$_pat" "$_sev" "$_id" "$_desc" >>"$WORKDIR/cmap"
-	done
+	printf '%s\n' "$_sigs" | awk -F'|' '
+		function globToRe(g,   out, i, c, n) {
+			out = "^"; i = 1; n = length(g)
+			while (i <= n) {
+				c = substr(g, i, 1)
+				if (c == "*") {
+					if (substr(g, i+1, 1) == "*") {
+						if (substr(g, i+2, 1) == "/") { out = out "(.*/)?"; i += 3; continue }
+						out = out ".*"; i += 2; continue
+					}
+					out = out "[^/]*"; i++; continue
+				}
+				if (c == "?") { out = out "[^/]"; i++; continue }
+				if (c ~ /[.[\]()+^$\\{}|]/) out = out "\\" c
+				else out = out c
+				i++
+			}
+			return out "$"
+		}
+		{
+			sev=$2; id=$3; pat=$4
+			desc=$5
+			for (i=6; i<=NF; i++) desc = desc "|" $i
+			scope = ""
+			if (substr(pat, 1, 1) == "[") {
+				close_at = index(pat, "] ")
+				if (close_at > 1) {
+					globs = substr(pat, 2, close_at - 2)
+					pat = substr(pat, close_at + 2)
+					n = split(globs, g, ",")
+					for (j = 1; j <= n; j++) {
+						gsub(/^[ \t]+|[ \t]+$/, "", g[j])
+						if (g[j] == "") continue
+						scope = scope (scope == "" ? "" : "|") "(" globToRe(g[j]) ")"
+					}
+				}
+			}
+			print pat > patfile
+			printf "%s\t%s|%s|%s\t%s\n", pat, sev, id, desc, scope > mapfile
+		}
+	' patfile="$WORKDIR/cpat" mapfile="$WORKDIR/cmap"
 	[ -s "$WORKDIR/cpat" ] || return 0
 
-	# -o with -H gives path:pattern per hit. -a so a binary payload does not
-	# suppress output. xargs batches the file list; -n keeps the argument list
-	# under the platform limit.
-	# Two stages. `grep -l` stops at the first match per file and keeps grep on its
-	# fast fixed-string path, so the broad sweep over every candidate is as cheap
-	# as possible. Only the few files that matched are then re-read with `-o` to
-	# learn which pattern hit, which is the expensive mode.
-	#
-	# NUL-delimited so paths containing spaces survive xargs. -a because a binary
-	# payload must not suppress output.
-	#
-	# Chunked so the time budget is checked as we go. This is the longest stage, so
-	# without a check here --timeout would not bound the scan.
+	# Broad sweep. grep -l stops at the first match per file and keeps grep on its
+	# fast fixed-string path. -a so a binary payload does not suppress output.
 	: >"$WORKDIR/chits"
 	_total=$(wc -l <"$CONTENTCAND_FILE" | tr -d ' ')
 	_off=1
@@ -985,9 +1023,8 @@ check_content() {
 		sort -u |
 		while IFS= read -r line; do
 			[ -n "$line" ] || continue
-			# grep -H output is path:matched-text. A path may itself contain ':',
-			# so split on the LAST occurrence of a known pattern instead: look up
-			# each candidate pattern as a suffix.
+			# grep -H output is path:matched-text. A path may itself contain ':', so
+			# match a known pattern as a suffix instead of splitting on the first ':'.
 			_hitpat=""
 			_path=""
 			while IFS= read -r p; do
@@ -1003,12 +1040,20 @@ check_content() {
 			[ -n "$_hitpat" ] || continue
 			_rec=$(awk -F'\t' -v h="$_hitpat" '$1==h {print $2; exit}' "$WORKDIR/cmap")
 			[ -n "$_rec" ] || continue
+			_scope=$(awk -F'\t' -v h="$_hitpat" '$1==h {print $3; exit}' "$WORKDIR/cmap")
+			if [ -n "$_scope" ]; then
+				printf '%s\n' "$_path" | grep -qE -- "$_scope" || {
+					info "out of scope: $_path does not match the scope for ${_rec#*|}"
+					continue
+				}
+			fi
 			_sev=$(printf '%s' "$_rec" | cut -d'|' -f1)
 			_id=$(printf '%s' "$_rec" | cut -d'|' -f2)
 			_desc=$(printf '%s' "$_rec" | cut -d'|' -f3-)
 			printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$_path" "content match" "$_desc" >>"$FINDINGS_FILE"
 		done
 }
+
 
 build_pkgver_lookup() {
 	# name@version -> SEV|ID|DESC, one record per line. Built once so the checks

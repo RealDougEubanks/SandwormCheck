@@ -108,6 +108,10 @@ code:
 ```sh
 #!/bin/sh
 set -u
+# /var/log is outside the default scan roots. Do not write reports inside a scanned
+# path: findings embed the marker strings, so an earlier report used to be flagged as
+# a compromise by the next scan. CONTENT signatures are scoped now, but keeping
+# output out of scanned trees removes the question.
 OUT="/var/log/sandwormcheck/$(date -u +%Y%m%dT%H%M%SZ).json"
 mkdir -p "$(dirname "$OUT")"
 

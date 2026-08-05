@@ -120,6 +120,99 @@ seconds. Cost scales with files scanned, not with the number of signatures — s
 
 More examples, including JSON output and CI use, are in [docs/usage.md](docs/usage.md).
 
+## Self-updating runner (recommended)
+
+These snippets pull the latest `main` from this repository, then run the right scanner for
+the OS. Re-running them picks up new signatures and fixes automatically, so the same
+command keeps working as the repo changes. Both pass the scanner's exit code through
+unchanged.
+
+They are also committed as [`tools/run-latest.sh`](tools/run-latest.sh) and
+[`tools/run-latest.ps1`](tools/run-latest.ps1), but paste them rather than referencing
+them — you need the update logic before you have the repo.
+
+### macOS and Linux
+
+```sh
+#!/bin/sh
+# SandwormCheck: update from the public repo, then scan this host.
+# Exit: 0 clean | 10 suspect | 20 CONFIRMED compromise | 1 scanner error | 2 usage
+set -u
+REPO=https://github.com/RealDougEubanks/SandwormCheck.git
+DEST=/opt/sandwormcheck
+REF=main
+
+command -v git >/dev/null 2>&1 || { echo "git not found" >&2; exit 1; }
+
+if [ -d "$DEST/.git" ]; then
+    git -C "$DEST" fetch --quiet --depth 1 origin "$REF" &&
+        git -C "$DEST" reset --hard --quiet FETCH_HEAD
+else
+    rm -rf "$DEST"
+    mkdir -p "$(dirname "$DEST")"
+    git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST"
+fi
+
+[ -f "$DEST/sandwormcheck.sh" ] || {
+    echo "update failed and no usable copy at $DEST" >&2
+    exit 1
+}
+
+sh "$DEST/sandwormcheck.sh" --timeout 900
+```
+
+### Windows
+
+```powershell
+# SandwormCheck: update from the public repo, then scan this host.
+# Exit: 0 clean | 10 suspect | 20 CONFIRMED compromise | 1 scanner error | 2 usage
+$repo = 'https://github.com/RealDougEubanks/SandwormCheck.git'
+$dest = Join-Path $env:ProgramData 'SandwormCheck'
+$ref  = 'main'
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    [Console]::Error.WriteLine('git not found'); exit 1
+}
+
+if (Test-Path (Join-Path $dest '.git')) {
+    git -C $dest fetch --quiet --depth 1 origin $ref
+    if ($LASTEXITCODE -eq 0) { git -C $dest reset --hard --quiet FETCH_HEAD }
+} else {
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    git clone --quiet --depth 1 --branch $ref $repo $dest
+}
+
+$scanner = Join-Path $dest 'SandwormCheck.ps1'
+if (-not (Test-Path $scanner)) {
+    [Console]::Error.WriteLine("update failed and no usable copy at $dest"); exit 1
+}
+
+# $LASTEXITCODE must be cleared first: if the scanner fails to start, a stale 0
+# from git would report this host as clean when it was never scanned.
+$global:LASTEXITCODE = $null
+& $scanner -TimeoutSeconds 900
+if ($null -eq $LASTEXITCODE) {
+    [Console]::Error.WriteLine('scanner produced no exit code'); exit 1
+}
+exit $LASTEXITCODE
+```
+
+### Two things to get right
+
+**Always propagate the exit code.** `exit $LASTEXITCODE` on the last PowerShell line is
+load-bearing — without it the policy reports the wrapper's status and every host looks
+clean. Clearing `$LASTEXITCODE` first matters for the same reason: a stale `0` from `git`
+would be reported as a clean scan if the scanner failed to launch.
+
+**Consider pinning `$REF` for production fleets.** Auto-running a moving branch means
+trusting every future commit to this repository — the same class of risk this tool exists
+to detect. Point `REF` at a reviewed tag, or mirror the repo internally, and update
+deliberately. The shipped `tools/run-latest.*` accept a ref for exactly this reason.
+
+If the update fails but a previous checkout exists, `tools/run-latest.*` warn loudly and
+scan with the older copy rather than not scanning at all; a missing checkout is a hard
+error, never a clean result.
+
 ## Fleet deployment
 
 [docs/jumpcloud.md](docs/jumpcloud.md) has copy-paste JumpCloud commands for macOS,

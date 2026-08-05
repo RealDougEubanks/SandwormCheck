@@ -50,6 +50,11 @@ sh "$DEST/sandwormcheck.sh" --timeout 600
 If your fleet has no outbound git access, drop the repo into your golden image or push it
 with a JumpCloud file distribution policy and reduce the command to the final line.
 
+The same snippets, hardened and with a stale-copy fallback, ship as
+`tools/run-latest.sh` and `tools/run-latest.ps1`. The README's
+"Self-updating runner" section explains why the ref is worth pinning for a
+production fleet.
+
 ### Windows
 
 Command type **Windows**, which runs as SYSTEM in PowerShell.
@@ -75,8 +80,14 @@ try {
     exit 1
 }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-    -File (Join-Path $dest 'SandwormCheck.ps1') -TimeoutSeconds 600
+# Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
+# would be reported as a clean scan of a host that was never scanned.
+$global:LASTEXITCODE = $null
+& (Join-Path $dest 'SandwormCheck.ps1') -TimeoutSeconds 600
+if ($null -eq $LASTEXITCODE) {
+    [Console]::Error.WriteLine('sandwormcheck: scanner produced no exit code')
+    exit 1
+}
 exit $LASTEXITCODE
 ```
 

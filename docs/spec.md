@@ -143,6 +143,11 @@ every command line with no exclusions reported an operator's own
 would have implicated themselves. Narrowing to `argv[0]`/`argv[1]` fixed that but
 missed `bun run <payload>`, where the payload sits at `argv[2]`.
 
+Shells running an **inline** script (`-c`, `-Command`) are skipped: the whole script text
+sits in their arguments, so any mention of an artifact name matched. An operator running
+`sh -c "...Math_Symbol.js..."` was reported as a confirmed compromise. A real script implant
+runs as `/bin/sh /path/implant.sh`, with no `-c`.
+
 **Findings name the PID only, never the command line.** Command lines can carry
 credentials passed as arguments, and findings are written to fleet console logs;
 printing one would relocate a secret. Asserted by a test.
@@ -254,9 +259,24 @@ disable it. Default scope:
   `$HOME` and root's home)
 - `/opt`, `/srv`, `/var/www`, `/usr/local/lib/node_modules`
 
+A scan root that is a **symlink is followed** (`find -H`); symlinks *inside* the tree are
+not. Following inner links would let one pull the scan outside its root and permit cycles.
+Without following the root, a symlinked path such as macOS's `/tmp` walks zero files and the
+scan reports clean.
+
+**Always excluded** — the scanner's own directory, its loaded signature files, and anything
+passed to `--exclude`. This is load-bearing rather than tidy: `tests/fixtures/` is built to
+trip every signature and the tool installs into a default scan root, so without it a fresh
+install reports itself as a confirmed compromise. Signature files match their own `CONTENT`
+patterns for the same reason. Other copies of the repository are not auto-excluded, because
+detecting "a checkout" anywhere would be a spoofable blind spot — use `--exclude`.
+
 **Pruned unconditionally** — never descended into:
 `.git/objects`, `.Trash`, `Library/Caches`, `Library/CloudStorage`, `/System`,
-`/private/var/vm`, `/proc`, `/sys`, `/dev`, `/Volumes`, `/net`, snap/flatpak mounts.
+`/private/var/vm`, `/proc`, `/sys`, `/dev`, `/Volumes`, `/net`, snap/flatpak mounts, and the
+tool-managed snapshot stores `file-history` and `.history`. Snapshot stores mirror whatever
+was edited, so they reproduce every marker string the scanner looks for: 142 of 156 findings
+on the development machine were an agent's `file-history` copies of the signature files.
 
 **Explicit host paths**: the `PATHEXISTS` records are checked directly, independent of
 scan roots, so persistence units are found even with a narrow `--path`.
@@ -265,9 +285,21 @@ Bounds, all overridable:
 - `--max-depth` (default 12) — passed to the directory walk.
 - `--max-file-size` (default 8 MiB) — files above this are not hashed or content-searched.
   The payload is ~728 KB; the cap keeps a stray VM image from stalling the scan.
-- `--timeout` (default 900s) — wall-clock ceiling. On expiry the scanner reports what
-  it found, prints an explicit truncation warning, and exits `1` if nothing was found
-  (an incomplete scan is not a clean scan) or the severity code if something was.
+- `--timeout` (default 1800s) — wall-clock ceiling for the **whole** scan. On expiry the
+  scanner reports what it found, prints an explicit truncation warning naming the stages
+  that were skipped, and exits `1` if nothing was found (an incomplete scan is not a clean
+  scan) or the severity code if something was.
+
+  The budget is checked between stages and between work chunks (4,000 files for the content
+  sweep, 2,000 for hashing), and once per root during the walk. It is therefore a **soft**
+  ceiling: a scan can overshoot by up to one chunk or one root. A 60s budget measured 92s
+  on a large home directory. When sizing this against a fleet tool's own command timeout,
+  leave headroom — the point is for the scanner to self-report a truncated scan rather than
+  be killed mid-run, which yields no verdict at all.
+
+  Cheap checks (persistence paths, filenames, path globs, processes, package versions,
+  lockfiles) always run. Only the expensive content and hash sweeps are skipped when the
+  budget is gone, so a truncated scan still covers the highest-signal indicators.
 
 Content and hash checks only consider *candidate* files: those whose basename matches a
 `FILENAME` signature, or that live in a path segment named `node_modules`, `.claude`,

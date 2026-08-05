@@ -12,8 +12,24 @@ TESTDIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$TESTDIR")
 SCANNER="$ROOT/sandwormcheck.sh"
 SIGS="$ROOT/signatures"
-FIX="$TESTDIR/fixtures"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/bwc-tests.XXXXXX")
+
+# Fixtures are scanned from a COPY outside the repository.
+#
+# The scanner always excludes its own install directory, because tests/fixtures is
+# built to trip every signature and tools/run-latest.* install into a default scan
+# root -- without that exclusion a fleet-wide run reported CONFIRMED COMPROMISE on
+# every host from the tool's own test data. That exclusion also covers the fixtures
+# in place, so scanning them from the repository would test nothing.
+#
+# Copying them out means the suite exercises the real shipped default (self-
+# exclusion enabled) rather than needing an escape hatch that production never
+# uses. It also keeps the run hermetic: nothing under the repository is mutated.
+cp -R "$TESTDIR/fixtures" "$TMP/fixtures" 2>/dev/null || {
+	printf 'could not copy fixtures to %s\n' "$TMP/fixtures" >&2
+	exit 1
+}
+FIX="$TMP/fixtures"
 
 PASS=0
 FAIL=0
@@ -322,6 +338,161 @@ test_process_check() {
 		--path "$TMP/procempty" --signatures "$SIGS" --no-color
 	refute_out "SH25-X" "no PROCESS finding from a search tool"
 	wait "$_g" 2>/dev/null || :
+}
+
+test_symlinked_root() {
+	section "symlinked scan root [$CURRENT_SHELL]"
+
+	# `find <symlink>` returns ZERO files without -H, so a symlinked scan root
+	# silently covered nothing and the scan reported CLEAN. On macOS /tmp is a
+	# symlink to private/tmp; a relocated home directory is often a symlink too.
+	# This was a false clean, the worst failure mode this tool has.
+	mkdir -p "$TMP/symreal/proj/node_modules/keyv"
+	printf 'inert fixture\n' >"$TMP/symreal/proj/node_modules/keyv/Math_Symbol.js"
+	printf '{"name":"keyv","version":"6.0.0"}\n' >"$TMP/symreal/proj/node_modules/keyv/package.json"
+	ln -sfn "$TMP/symreal" "$TMP/symlink-root"
+
+	run 20 "a planted payload is found via the real path" \
+		--path "$TMP/symreal" --signatures "$SIGS" --no-color
+	run 20 "the same payload is found via a SYMLINKED root" \
+		--path "$TMP/symlink-root" --signatures "$SIGS" --no-color
+	expect_out "Math_Symbol.js" "the finding is reported through the symlinked root"
+
+	# The other half: symlinks INSIDE the tree must NOT be followed. Following them
+	# would let a link pull the scan outside its root and allow cycles.
+	mkdir -p "$TMP/syminner/proj"
+	ln -sfn "$TMP/symreal" "$TMP/syminner/proj/points-at-payload"
+	ln -sfn "$TMP/syminner" "$TMP/syminner/proj/self-loop"
+	run 0 "a symlink inside the tree is not followed, and does not loop" \
+		--path "$TMP/syminner" --signatures "$SIGS" --no-color --timeout 60
+	refute_out "Math_Symbol.js" "the scan did not escape its root via an inner symlink"
+}
+
+test_timeout_bounds_whole_scan() {
+	section "--timeout bounds the whole scan"
+
+	# The budget was once checked only between roots, so the walk and the content
+	# sweep ran unbounded: a 20s budget produced a 400s scan. A fleet tool would
+	# then kill the scan mid-run and the operator would get no verdict at all,
+	# which is worse than a reported truncation.
+	#
+	# Whether a 20s budget actually truncates depends on the machine: a developer
+	# home directory has hundreds of thousands of files, a CI runner does not. The
+	# assertions are therefore conditional on truncation having occurred, rather
+	# than assuming a slow host and failing spuriously on a fast one.
+	if [ ! -d "$HOME" ]; then
+		printf '  skip (no HOME to scan)\n'
+		return 0
+	fi
+
+	_t0=$(date +%s 2>/dev/null || echo 0)
+	"$CURRENT_SHELL" "$SCANNER" --path "$HOME" --signatures "$SIGS" \
+		--timeout 20 --no-color >"$TMP/out" 2>"$TMP/err"
+	_rc=$?
+	_el=$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))
+
+	if grep -qiE 'truncat' "$TMP/out"; then
+		ok "a 20s budget truncated the scan and said so (${_el}s)"
+		# Soft ceiling: overshoot of up to one chunk or one root is expected. The
+		# point is that it stops rather than running to completion.
+		if [ "$_el" -lt 180 ]; then
+			ok "the truncated scan stopped promptly (${_el}s for a 20s budget)"
+		else
+			no "the truncated scan stopped promptly" "took ${_el}s for a 20s budget"
+		fi
+		# An incomplete scan must never look like a clean bill of health.
+		if [ "$_rc" -eq 0 ]; then
+			no "a truncated scan does not exit 0" "exit was 0, which reads as clean"
+		else
+			ok "a truncated scan does not exit 0 (exit $_rc)"
+		fi
+	else
+		# The host finished inside the budget, which is a valid outcome.
+		printf '  skip (HOME scanned fully within 20s on this host; nothing to truncate)\n'
+		if [ "$_el" -lt 180 ]; then
+			ok "an untruncated scan completed within the budget (${_el}s)"
+		else
+			no "an untruncated scan completed within the budget" "took ${_el}s but claimed no truncation"
+		fi
+	fi
+}
+
+test_self_exclusion() {
+	section "the scanner does not report itself [$CURRENT_SHELL]"
+
+	# THE case that would have burned a whole fleet. tests/fixtures/ is built to
+	# trip every signature, and tools/run-latest.sh installs to /opt/sandwormcheck,
+	# which is a default scan root. Before self-exclusion, a fresh install scanned
+	# by itself returned exit 20 -- "isolate this host, rotate all credentials" --
+	# on every machine, 100% false positives on the first sweep.
+	mkdir -p "$TMP/selfdir"
+	cp -R "$ROOT" "$TMP/selfdir/copy" 2>/dev/null || :
+	rm -rf "$TMP/selfdir/copy/.git"
+	if [ ! -f "$TMP/selfdir/copy/sandwormcheck.sh" ]; then
+		printf '  skip (could not copy the tree)\n'
+		return 0
+	fi
+
+	( cd "$TMP/selfdir/copy" && "$CURRENT_SHELL" ./sandwormcheck.sh \
+		--path "$TMP/selfdir" --signatures signatures --quiet --no-color \
+		>"$TMP/out" 2>"$TMP/err" )
+	_rc=$?
+	if [ "$_rc" -eq 0 ]; then
+		ok "an install scanned by itself is CLEAN (own fixtures not reported)"
+	else
+		no "an install scanned by itself is CLEAN" "exit $_rc; $(grep -m1 CONFIRMED "$TMP/out")"
+	fi
+
+	# Self-exclusion must not become a blanket blind spot: a payload beside the
+	# install still has to be found.
+	mkdir -p "$TMP/selfdir/victim/proj/node_modules/keyv"
+	printf 'inert\n' >"$TMP/selfdir/victim/proj/node_modules/keyv/Math_Symbol.js"
+	printf '{"name":"keyv","version":"6.0.0"}\n' \
+		>"$TMP/selfdir/victim/proj/node_modules/keyv/package.json"
+	( cd "$TMP/selfdir/copy" && "$CURRENT_SHELL" ./sandwormcheck.sh \
+		--path "$TMP/selfdir" --signatures signatures --no-color \
+		>"$TMP/out" 2>"$TMP/err" )
+	expect_out "victim/proj/node_modules/keyv/Math_Symbol.js" \
+		"a payload next to the install is still detected"
+
+	# --exclude for sibling checkouts, which are deliberately NOT auto-excluded
+	# (matching "looks like a checkout" anywhere would be a spoofable blind spot).
+	"$CURRENT_SHELL" "$SCANNER" --path "$TMP/selfdir" --exclude "$TMP/selfdir/victim" \
+		--signatures "$SIGS" --no-color >"$TMP/out" 2>"$TMP/err"
+	refute_out "victim/proj/node_modules/keyv/Math_Symbol.js" \
+		"--exclude suppresses a path the operator asked to skip"
+}
+
+test_process_false_positives() {
+	section "PROCESS does not flag an operator's own tooling [$CURRENT_SHELL]"
+
+	mkdir -p "$TMP/pempty"
+
+	# A shell running an INLINE script carries the whole script text in its
+	# arguments. An incident responder running sh -c "...Math_Symbol.js..." was
+	# reported as a CONFIRMED compromise.
+	"$CURRENT_SHELL" -c 'echo "checking Math_Symbol.js and gh-token-monitor"; sleep 15' \
+		>/dev/null 2>&1 &
+	_inl=$!
+	sleep 1
+	run 0 "a shell running an inline script that names the artifacts is not flagged" \
+		--path "$TMP/pempty" --signatures "$SIGS" --no-color
+	refute_out "SH25-X" "no PROCESS finding from an inline shell script"
+	kill "$_inl" 2>/dev/null || :
+	sleep 1
+
+	# The inverse: a real script implant runs as `/bin/sh /path/implant.sh`, with no
+	# -c, and must still be caught.
+	mkdir -p "$TMP/pbin"
+	printf '#!/bin/sh\nsleep 15\n' >"$TMP/pbin/gh-token-monitor.sh"
+	chmod +x "$TMP/pbin/gh-token-monitor.sh"
+	"$TMP/pbin/gh-token-monitor.sh" &
+	_imp=$!
+	sleep 1
+	run 20 "a real script implant is still detected" \
+		--path "$TMP/pempty" --signatures "$SIGS" --no-color
+	expect_out "SH25-X001" "the watcher process is reported"
+	kill "$_imp" 2>/dev/null || :
 }
 
 test_signature_validation() {
@@ -812,6 +983,8 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_true_negatives
 	test_lockfiles
 	test_process_check
+	test_symlinked_root
+	test_process_false_positives
 	test_signature_validation
 	test_argument_validation
 	test_output_modes
@@ -825,6 +998,9 @@ done
 CURRENT_SHELL="sh"
 test_no_network
 test_gnu_stat_compat
+# Expensive and not shell-specific: a whole-tree copy and a large timed scan.
+test_self_exclusion
+test_timeout_bounds_whole_scan
 test_powershell_parity
 
 printf '\n===============================\n'

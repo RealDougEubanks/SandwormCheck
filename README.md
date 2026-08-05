@@ -102,10 +102,16 @@ Refresh the list with `tools/merge-package-list.sh`; see
 
 ## Performance
 
-Measured on a developer machine with 414,000 files and 14 GB across ~4,000 installed
-packages: **about 6.5 minutes**, inside the 900s default timeout. Small trees finish in
-seconds. Cost scales with files scanned, not with the number of signatures — see
-[docs/spec.md](docs/spec.md) §11. Run with `--verbose` to get elapsed seconds per stage.
+Measured on a developer machine (414,000 files, 14 GB, ~4,000 installed packages):
+
+- **~6.5 minutes** for a single large project tree (`--path ~/git`)
+- **~16 minutes** for a full default scan of every auto-detected root
+
+Small trees finish in seconds. The default `--timeout` is 1800s to accommodate the second
+case; **size it below your fleet tool's own command timeout** so a slow host self-reports a
+truncated scan (exit `1`) instead of being killed with no verdict at all. Cost scales with
+files scanned, not with the number of signatures — see [docs/spec.md](docs/spec.md) §11.
+`--verbose` reports elapsed seconds per stage.
 
 ## Usage
 

@@ -427,3 +427,80 @@ FILENAME/PATHGLOB to bring a file into scope), not of the host being scanned. Fo
 running the real deployment path against the public repository rather than a fixture.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+**Assumption:** The directory walk uses `find -H`, following a symlink given as a scan root
+but not symlinks encountered inside the tree.
+**Why:** `find <symlink>` returns zero files. Without `-H` a symlinked root was walked as
+nothing and the scan reported CLEAN — a false clean, the worst failure mode this tool has.
+It was not hypothetical: `/tmp` is a symlink to `private/tmp` on macOS, so `--path /tmp`
+scanned nothing, and a relocated or symlinked home directory would have silently gone
+uncovered across a fleet. Symlinks *within* the tree remain unfollowed on purpose: following
+them would let a link pull the scan outside its root and would allow cycles. Both halves are
+covered by tests.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The scanner always excludes its own directory and its loaded signature
+files, and prunes tool-managed snapshot stores (`file-history`, `.history`).
+**Why:** `tests/fixtures/` is built to trip every signature, and `tools/run-latest.*`
+installs to `/opt/sandwormcheck` or `%ProgramData%` — both inside default scan roots. A
+fresh install scanned by itself returned exit 20, "isolate this host and rotate all
+credentials", so a fleet-wide run would have reported **100% false positives on the first
+sweep** and permanently destroyed trust in the tool. Signature files also match their own
+`CONTENT` patterns, and editor/agent snapshot stores mirror any scanned content, which is
+how 142 of 156 findings on the development machine turned out to be Claude Code's
+`file-history` copies of the signature files.
+**Accepted blind spot:** anything able to write into the tool's own install directory could
+equally rewrite the scanner itself, so excluding it concedes nothing that was defensible.
+Other copies of the repository are deliberately NOT auto-excluded, because matching "looks
+like a SandwormCheck checkout" anywhere on disk would be trivially spoofable into an
+arbitrary blind spot; `--exclude` covers those explicitly.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** A signature *directory* is excluded wholesale, but a signature *file* only
+by its own exact path.
+**Why:** Excluding a signature file's parent directory silently excludes everything beside
+it. Pointing `--signatures` at a file in a directory that also holds scan targets would
+then cover nothing while still reporting a verdict. Caught when seven tests began passing
+signature files from the same temporary directory as their fixtures.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** Exclusion prefixes are compared with runs of slashes collapsed, and are
+recorded in both the `/private/...` and `/...` spellings on macOS.
+**Why:** `$TMPDIR` commonly ends in a slash, so walked paths can contain `T//name` while
+the prefix holds `T/name`; a trailing slash on `--exclude` produces the same mismatch; and
+macOS reaches the same directory as both `/tmp` and `/private/tmp`. Each of these made an
+exclusion silently miss, and a missed exclusion means the tool reports its own fixtures.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** `PROCESS` skips shells running an inline script (`-c`, `-Command`).
+**Why:** A shell invoked with `-c` carries the entire script text in its arguments, so any
+mention of an artifact name looks like a match. An incident responder running
+`sh -c "...Math_Symbol.js..."` was reported as a CONFIRMED compromise — the tool
+implicating the person investigating with it. A genuine script implant is executed as
+`/bin/sh /path/implant.sh`, with no `-c`, so skipping this form costs no real detection.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The test suite scans a COPY of `tests/fixtures/` placed outside the
+repository.
+**Why:** Self-exclusion covers the install directory, which contains the fixtures, so
+scanning them in place tested nothing — 127 assertions failed the moment self-exclusion
+landed. Copying them out lets the suite exercise the real shipped default rather than
+needing a `--no-self-exclude` escape hatch that production would never use, and keeps the
+run hermetic.
+**Recorded by:** Claude
+**Date:** 2026-08-05

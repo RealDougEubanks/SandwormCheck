@@ -62,6 +62,9 @@ param(
     [Alias('p')]
     [string[]] $Path,
 
+    [Alias('x')]
+    [string[]] $Exclude = @(),
+
     # Bounds are validated in Invoke-Main rather than with [ValidateRange], which
     # fails at parameter binding and would exit 1 instead of the documented
     # usage code 2: the sh and PowerShell scanners must agree on exit codes.
@@ -313,7 +316,10 @@ function Get-DefaultScanPaths {
 # avoids reparse points that can loop.
 $script:PruneNames = @(
     '.git', '$Recycle.Bin', 'Windows', 'WinSxS', 'Temp',
-    'INetCache', 'WebCache', 'Microsoft', 'OneDrive', 'Recent'
+    'INetCache', 'WebCache', 'Microsoft', 'OneDrive', 'Recent',
+    # Tool-managed snapshot stores mirror scanned content, so they reproduce every
+    # marker string the scanner looks for and generate pure noise.
+    'file-history', '.history'
 )
 
 function Get-WalkedFiles {
@@ -538,6 +544,74 @@ function Invoke-PkgVerCheck {
             }
         }
     }
+}
+
+# ---------------------------------------------------------------------------
+# Exclusions
+#
+# The scanner's own directory and signature directory are ALWAYS excluded. The
+# repository's tests/fixtures are built to trip every signature, and
+# tools/run-latest.ps1 installs under ProgramData, so without this a fleet-wide
+# run reported CONFIRMED COMPROMISE on every host from the tool's own test data.
+#
+# Accepted blind spot: anything able to write into the tool's install directory
+# could equally rewrite the scanner, so excluding it concedes nothing defensible.
+# Other copies of the repository are NOT auto-excluded, because matching "looks
+# like a checkout" anywhere would be a spoofable blind spot. Use -Exclude.
+# ---------------------------------------------------------------------------
+function Get-CanonicalPath {
+    param([string] $P)
+    try {
+        $item = Get-Item -LiteralPath $P -Force -ErrorAction Stop
+        if ($item.PSIsContainer) { return $item.FullName }
+        return $item.FullName
+    } catch { return $P }
+}
+
+function Get-NormalizedPath {
+    param([string] $P)
+    # Slashes unified and runs collapsed, so a trailing separator or a doubled one
+    # cannot defeat a prefix comparison.
+    $n = $P -replace '\\', '/'
+    while ($n -match '//') { $n = $n -replace '//', '/' }
+    return $n.TrimEnd('/')
+}
+
+function Build-Exclusions {
+    $out = New-Object System.Collections.ArrayList
+    $add = {
+        param($p)
+        if ([string]::IsNullOrWhiteSpace($p)) { return }
+        foreach ($v in @($p, (Get-CanonicalPath $p))) {
+            $nv = Get-NormalizedPath $v
+            if ($nv -and -not $out.Contains($nv)) { [void] $out.Add($nv) }
+        }
+    }
+
+    $selfDir = Split-Path -Parent $PSCommandPath
+    & $add $selfDir
+
+    if (-not [string]::IsNullOrWhiteSpace($SignaturePath)) {
+        if (Test-Path -LiteralPath $SignaturePath -PathType Container) {
+            & $add $SignaturePath
+        } else {
+            & $add (Split-Path -Parent $SignaturePath)
+        }
+    }
+    foreach ($e in $Exclude) { & $add $e }
+
+    Write-Diag "excluding $($out.Count) path prefix(es)"
+    return $out
+}
+
+function Test-Excluded {
+    param([string] $FilePath, [object[]] $Prefixes)
+    if (-not $Prefixes -or $Prefixes.Count -eq 0) { return $false }
+    $n = Get-NormalizedPath $FilePath
+    foreach ($p in $Prefixes) {
+        if ($n -eq $p -or $n.StartsWith($p + '/', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
 }
 
 # ---------------------------------------------------------------------------
@@ -1029,7 +1103,12 @@ function Invoke-Main {
         Write-Diag "walking $root"
         foreach ($f in (Get-WalkedFiles -Root $root -Depth $MaxDepth)) { [void] $allFiles.Add($f) }
     }
-    $allFilesArr = @($allFiles)
+    $exclusions = @(Build-Exclusions)
+    if ($exclusions.Count -gt 0) {
+        $allFilesArr = @($allFiles | Where-Object { -not (Test-Excluded $_ $exclusions) })
+    } else {
+        $allFilesArr = @($allFiles)
+    }
     $script:FilesWalked = $allFilesArr.Count
 
     # Wrap in @(): a PowerShell function returning an empty array yields $null,

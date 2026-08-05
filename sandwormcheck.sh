@@ -47,9 +47,10 @@ EXIT_CONFIRMED=20
 # ---------------------------------------------------------------------------
 SIG_ARG=""
 SCAN_PATHS=""
+EXCLUDE_PATHS=""
 MAX_DEPTH=12
 MAX_FILE_SIZE=8388608   # 8 MiB
-TIMEOUT_SECS=900
+TIMEOUT_SECS=1800
 OUTPUT_MODE="text"
 QUIET=0
 VERBOSE=0
@@ -114,10 +115,12 @@ Options:
   -s, --signatures PATH   Signature file or directory (default: ./signatures)
   -p, --path PATH         Scan root; repeatable. Default: auto-detected user
                           home directories and common deployment paths.
+  -x, --exclude PATH      Do not scan under PATH; repeatable. The scanner's own
+                          directory and its signature directory are always excluded.
       --max-depth N       Directory walk depth limit (1-64, default 12)
       --max-file-size N   Skip files larger than N bytes for hash/content
                           checks (1024-1073741824, default 8388608)
-      --timeout N         Wall-clock scan limit in seconds (10-86400, default 900)
+      --timeout N         Wall-clock scan limit in seconds (10-86400, default 1800)
       --json              Emit a single JSON object instead of text
   -q, --quiet             Print only the verdict line
   -v, --verbose           Print progress to stderr
@@ -155,6 +158,12 @@ parse_args() {
 		-s | --signatures)
 			[ $# -ge 2 ] || die "$EXIT_USAGE" "$1 requires an argument"
 			SIG_ARG=$2
+			shift 2
+			;;
+		-x | --exclude)
+			[ $# -ge 2 ] || die "$EXIT_USAGE" "$1 requires an argument"
+			EXCLUDE_PATHS="$EXCLUDE_PATHS$2
+"
 			shift 2
 			;;
 		-p | --path)
@@ -228,6 +237,108 @@ script_dir() {
 		esac
 	fi
 	(cd "$(dirname "$_s")" 2>/dev/null && pwd) || printf '.'
+}
+
+canon() {
+	# Canonical absolute path, or the input unchanged if it cannot be resolved.
+	# `realpath` is not present on every macOS version, so use a subshell cd.
+	if [ -d "$1" ]; then
+		(cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"
+	else
+		_cd=$(dirname "$1")
+		_cb=$(basename "$1")
+		_cr=$( (cd "$_cd" 2>/dev/null && pwd -P) || printf '%s' "$_cd")
+		printf '%s/%s' "$_cr" "$_cb"
+	fi
+}
+
+emit_excl() {
+	# Record a prefix in every spelling the walk might produce.
+	#
+	# macOS reaches the same directory by two names: /tmp and /var are symlinks to
+	# /private/tmp and /private/var. `find -H` keeps whichever name the caller gave,
+	# so a canonical-only prefix silently fails to match. That is not cosmetic here:
+	# a missed exclusion means the tool reports its own test fixtures.
+	[ -n "$1" ] || return 0
+	printf '%s\n' "$1" >>"$WORKDIR/excl"
+	_c=$(canon "$1")
+	[ -n "$_c" ] && printf '%s\n' "$_c" >>"$WORKDIR/excl"
+	for _v in "$1" "$_c"; do
+		case $_v in
+		/private/*) printf '%s\n' "${_v#/private}" >>"$WORKDIR/excl" ;;
+		/var/* | /tmp/*) printf '/private%s\n' "$_v" >>"$WORKDIR/excl" ;;
+		esac
+	done
+}
+
+build_exclusions() {
+	# Paths whose contents must never be reported.
+	#
+	# The scanner's own directory and signature directory are ALWAYS excluded. This
+	# is not cosmetic: the repository's tests/fixtures are built to trip every
+	# signature, and tools/run-latest.sh installs to /opt/sandwormcheck, which is a
+	# default scan root. Without this, a fleet-wide run reported CONFIRMED
+	# COMPROMISE on every host because the scanner found its own test data --
+	# 100% false positives on the first sweep.
+	#
+	# Accepted blind spot, and why it is acceptable: anything able to write into the
+	# tool's own install directory could equally rewrite the scanner itself, so
+	# excluding it concedes nothing that was defensible. Other copies of this
+	# repository (a developer checkout) are NOT excluded automatically, because
+	# matching "looks like a SandwormCheck checkout" anywhere on disk would be
+	# trivially spoofable into an arbitrary blind spot. Use --exclude for those.
+	: >"$WORKDIR/excl"
+	emit_excl "$(script_dir)"
+
+	# Signature files match their own CONTENT patterns, so they must not be
+	# reported. Excluded PRECISELY: a signature directory as a whole (it holds only
+	# .conf files by design), but a signature FILE only by its own path.
+	#
+	# Excluding a signature file's parent directory instead would silently exclude
+	# whatever else lives beside it -- pointing --signatures at a file in a
+	# directory that also contains scan targets would quietly cover nothing.
+	if [ -n "$SIG_ARG" ] && [ -d "$SIG_ARG" ]; then
+		emit_excl "$SIG_ARG"
+	fi
+	for _sf in $SIGFILES; do
+		[ -n "$_sf" ] || continue
+		emit_excl "$_sf"
+	done
+
+	printf '%s\n' "$EXCLUDE_PATHS" | while IFS= read -r _e; do
+		[ -n "$_e" ] || continue
+		emit_excl "$_e"
+	done
+
+	sort -u "$WORKDIR/excl" -o "$WORKDIR/excl" 2>/dev/null ||
+		{ sort -u "$WORKDIR/excl" >"$WORKDIR/ex.tmp" && mv "$WORKDIR/ex.tmp" "$WORKDIR/excl"; }
+	awk 'NF' "$WORKDIR/excl" >"$WORKDIR/ex2" && mv "$WORKDIR/ex2" "$WORKDIR/excl"
+	info "excluding $(wc -l <"$WORKDIR/excl" | tr -d ' ') path prefix(es)"
+}
+
+apply_exclusions() {
+	# stdin/stdout filter over a file list.
+	#
+	# Both sides are compared with runs of slashes squeezed to one. TMPDIR commonly
+	# ends in a slash, so walked paths can contain "T//name" while the prefix has
+	# "T/name"; a trailing slash on --exclude causes the same mismatch. Either way a
+	# missed exclusion means the tool reports its own fixtures, so the comparison
+	# must not be sensitive to it. The ORIGINAL line is printed, so reported paths
+	# are unchanged.
+	awk -v ef="$WORKDIR/excl" '
+		function norm(p) { gsub(/\/+/, "/", p); return p }
+		BEGIN {
+			while ((getline l < ef) > 0) if (l != "") ex[++n] = norm(l)
+			close(ef)
+		}
+		{
+			t = norm($0)
+			for (i = 1; i <= n; i++) {
+				if (t == ex[i] || index(t, ex[i] "/") == 1) next
+			}
+			print
+		}
+	'
 }
 
 probe_hashers() {
@@ -371,6 +482,26 @@ elapsed() {
 
 timed_out() {
 	[ "$(elapsed)" -ge "$TIMEOUT_SECS" ]
+}
+
+mark_truncated() {
+	printf '1' >"$WORKDIR/truncated" 2>/dev/null || :
+	TRUNCATED=1
+}
+
+# Returns success while there is still time budget. Used between stages and between
+# work chunks so --timeout bounds the WHOLE scan, not just the directory walk.
+#
+# Previously timed_out() was consulted only while walking directories. The content
+# sweep is the longest stage by far, so a scan could run far past --timeout; a fleet
+# tool would then kill it and the operator would get no verdict at all, which is
+# strictly worse than a reported truncation.
+budget_left() {
+	if timed_out; then
+		mark_truncated
+		return 1
+	fi
+	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -517,9 +648,16 @@ walk() {
 	case $_root in
 	/proc* | /sys* | /dev* | /Volumes* | /net* | /System*) return 0 ;;
 	esac
-	find "$_root" -maxdepth "$MAX_DEPTH" \
+	# -H follows a symlink given ON THE COMMAND LINE but not symlinks found inside
+	# the tree. Without it a symlinked root yields zero files and the scan reports
+	# CLEAN: /tmp is a symlink to private/tmp on macOS, and a relocated home
+	# directory is often a symlink too, so whole roots silently went unscanned.
+	# Symlinks *within* the tree stay unfollowed, which avoids cycles and stops a
+	# link from pulling the scan outside its root.
+	find -H "$_root" -maxdepth "$MAX_DEPTH" \
 		\( -name .git -o -name .Trash -o -name Caches \
-		-o -name CloudStorage -o -name .npm-cache \) -prune -o \
+		-o -name CloudStorage -o -name .npm-cache \
+		-o -name file-history -o -name .history \) -prune -o \
 		-type f -print 2>/dev/null || :
 }
 
@@ -658,11 +796,23 @@ check_hashes() {
 			printf '%s\t%s\n' "$_d" "$f"
 		done <"$HASHCAND_FILE" >"$WORKDIR/digests.$_algo"
 	else
-		# shellcheck disable=SC2086  # $_hasher is a command plus its flags
-		tr '\n' '\0' <"$HASHCAND_FILE" |
-			xargs -0 -n 200 $_hasher 2>/dev/null |
-			awk '{ d=$1; $1=""; sub(/^[ \t]+/, ""); printf "%s\t%s\n", tolower(d), $0 }' \
-				>"$WORKDIR/digests.$_algo" || :
+		: >"$WORKDIR/digests.$_algo"
+		_htotal=$(wc -l <"$HASHCAND_FILE" | tr -d ' ')
+		_hoff=1
+		while [ "$_hoff" -le "$_htotal" ]; do
+			budget_left || {
+				warn "$_type hashing stopped at $((_hoff - 1)) of $_htotal files (--timeout ${TIMEOUT_SECS}s)"
+				break
+			}
+			_hend=$((_hoff + 2000 - 1))
+			# shellcheck disable=SC2086  # $_hasher is a command plus its flags
+			sed -n "${_hoff},${_hend}p" "$HASHCAND_FILE" |
+				tr '\n' '\0' |
+				xargs -0 -n 200 $_hasher 2>/dev/null |
+				awk '{ d=$1; $1=""; sub(/^[ \t]+/, ""); printf "%s\t%s\n", tolower(d), $0 }' \
+					>>"$WORKDIR/digests.$_algo" || :
+			_hoff=$((_hend + 1))
+		done
 	fi
 
 	awk -F'\t' -v mapfile="$WORKDIR/hmap.$_algo" -v t="$_type" '
@@ -711,10 +861,26 @@ check_content() {
 	#
 	# NUL-delimited so paths containing spaces survive xargs. -a because a binary
 	# payload must not suppress output.
+	#
+	# Chunked so the time budget is checked as we go. This is the longest stage, so
+	# without a check here --timeout would not bound the scan.
 	: >"$WORKDIR/chits"
-	tr '\n' '\0' <"$CONTENTCAND_FILE" |
-		xargs -0 -n 200 grep -laFf "$WORKDIR/cpat" 2>/dev/null |
-		sort -u >"$WORKDIR/chits" || :
+	_total=$(wc -l <"$CONTENTCAND_FILE" | tr -d ' ')
+	_off=1
+	_chunk=4000
+	while [ "$_off" -le "$_total" ]; do
+		budget_left || {
+			warn "content scan stopped at $((_off - 1)) of $_total candidate files (--timeout ${TIMEOUT_SECS}s)"
+			break
+		}
+		_end=$((_off + _chunk - 1))
+		sed -n "${_off},${_end}p" "$CONTENTCAND_FILE" |
+			tr '\n' '\0' |
+			xargs -0 -n 200 grep -laFf "$WORKDIR/cpat" 2>/dev/null >>"$WORKDIR/chits" || :
+		_off=$((_end + 1))
+	done
+	sort -u "$WORKDIR/chits" -o "$WORKDIR/chits" 2>/dev/null ||
+		{ sort -u "$WORKDIR/chits" >"$WORKDIR/ch.tmp" && mv "$WORKDIR/ch.tmp" "$WORKDIR/chits"; }
 	[ -s "$WORKDIR/chits" ] || return 0
 
 	tr '\n' '\0' <"$WORKDIR/chits" |
@@ -891,6 +1057,22 @@ check_process() {
 			b = exe
 			if (match(b, /\/[^\/]+$/)) b = substr(b, RSTART + 1)
 			if (b in tool) next
+
+			# A shell running an INLINE script (-c) carries the whole script text in
+			# its arguments, so any mention of an artifact name looks like a match.
+			# An incident responder running `sh -c "...Math_Symbol.js..."` was
+			# reported as a CONFIRMED compromise. A real script-based implant is
+			# executed as `/bin/sh /path/to/implant.sh`, with no -c, so skipping this
+			# form costs no genuine detection.
+			if (b ~ /^(sh|bash|dash|zsh|ksh|fish|csh|tcsh|pwsh|powershell)$/) {
+				isInline = 0
+				for (j = 4; j <= NF; j++) {
+					if ($j == "-c" || $j == "-Command" || $j == "-EncodedCommand") { isInline = 1; break }
+					# The first non-flag argument is the script path; stop there.
+					if (substr($j, 1, 1) != "-") break
+				}
+				if (isInline) next
+			}
 			# Full argument list, fields 3..NF.
 			hay = ""
 			for (j = 3; j <= NF; j++) hay = hay " " $j
@@ -1071,8 +1253,29 @@ build_file_lists() {
 			break
 		fi
 		info "walking $root"
-		walk "$root" >>"$WORKDIR/allfiles"
+		# The budget is checked WHILE the root is walked, not just between roots.
+		# A single `find` over a large home directory can take several minutes, so
+		# checking only between roots left --timeout unable to stop the dominant
+		# stage: a fleet tool would kill the scan and yield no verdict at all.
+		# Breaking this loop closes the pipe and find exits on SIGPIPE.
+		walk "$root" | {
+			_wn=0
+			while IFS= read -r _wf; do
+				printf '%s\n' "$_wf"
+				_wn=$((_wn + 1))
+				if [ $((_wn % 2000)) -eq 0 ] && timed_out; then
+					mark_truncated
+					break
+				fi
+			done
+		} >>"$WORKDIR/allfiles"
 	done
+
+	# Drop excluded prefixes before anything else looks at the list, so no check
+	# can report a path the operator asked to skip.
+	if [ -s "$WORKDIR/excl" ]; then
+		apply_exclusions <"$WORKDIR/allfiles" >"$WORKDIR/af2" && mv "$WORKDIR/af2" "$WORKDIR/allfiles"
+	fi
 
 	# Candidates: files the malware is known to write, or files inside the
 	# directories it writes into. Hashing/grepping the whole disk is not viable.
@@ -1220,8 +1423,11 @@ report_text() {
 			printf '\n'
 		fi
 		if [ "$TRUNCATED" -eq 1 ]; then
-			printf '%sSCAN TRUNCATED: the %ss timeout expired before all roots were walked.%s\n' \
+			# Truncation can now happen in any stage, not only the walk, so the
+			# message no longer claims to know where.
+			printf '%sSCAN TRUNCATED: the %ss --timeout was exhausted before the scan finished.%s\n' \
 				"$C_RED" "$TIMEOUT_SECS" "$C_OFF"
+			printf 'Some checks did not run. See the warnings on stderr for which.\n'
 			printf 'This result is NOT a clean bill of health. Re-run with a longer --timeout.\n\n'
 		fi
 	fi
@@ -1331,23 +1537,35 @@ main() {
 	)
 	HOMES=$(printf '%s\n' "$HOMES" | awk 'NF && !seen[$0]++')
 
+	build_exclusions
 	build_file_lists
 
+	# Cheap, high-value checks run first and are never skipped for time. The
+	# expensive sweeps are guarded so --timeout bounds the whole scan.
 	info "checking explicit persistence paths"
 	check_pathexists
 	info "checking filenames and path globs"
 	check_filenames_and_globs
+	info "checking running processes"
+	check_process
 	info "checking package versions"
 	check_pkgver
 	info "checking lockfile pins"
 	check_lockfiles
-	info "checking running processes"
-	check_process
-	info "checking content markers"
-	check_content
-	info "checking hashes"
-	check_hashes sha256 SHA256
-	check_hashes sha1 SHA1
+
+	if budget_left; then
+		info "checking content markers"
+		check_content
+	else
+		warn "skipped content markers: --timeout ${TIMEOUT_SECS}s exhausted"
+	fi
+	if budget_left; then
+		info "checking hashes"
+		check_hashes sha256 SHA256
+		check_hashes sha1 SHA1
+	else
+		warn "skipped hash checks: --timeout ${TIMEOUT_SECS}s exhausted"
+	fi
 
 	# De-duplicate: the same artifact can trip several signatures via different
 	# check types, and one line per (severity,id,path) is enough.

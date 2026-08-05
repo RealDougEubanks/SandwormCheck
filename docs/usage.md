@@ -92,7 +92,7 @@ the payload is ~728 KB. Raise it only if you have a reason to.
 
 ### `--timeout N` / `-TimeoutSeconds N`
 
-Wall-clock ceiling, 10–86400, default 900. On expiry the scanner reports what it found
+Wall-clock ceiling for the whole scan, 10–86400, default 1800. On expiry the scanner reports what it found
 and marks the run truncated. **A truncated scan that found nothing exits `1`, not `0`** —
 an incomplete scan is not a clean scan.
 
@@ -133,6 +133,21 @@ One JSON object on stdout. Diagnostics stay on stderr, so stdout is always parse
 
 The `schema` field is versioned. Anything consuming this output should check it before
 reading fields, so a future `sandwormcheck/v2` does not break your pipeline silently.
+
+### `-x`, `--exclude PATH` / `-Exclude PATH`
+
+Do not scan under `PATH`. Repeatable.
+
+The scanner's own directory and its signature files are excluded automatically — the
+repository's `tests/fixtures/` is built to trip every signature, so without that a fresh
+install reports itself as compromised. Use this flag for a **second** copy, such as a
+developer checkout of this repository, or for a directory holding saved IOC documentation:
+a file containing `Shai-Hulud: Here We Go Again` matches whether it is a payload or a
+vendor advisory you saved.
+
+```sh
+./sandwormcheck.sh --exclude ~/git/SandwormCheck --exclude ~/Documents/incident-notes
+```
 
 ### `-q`, `--quiet` / `-Quiet`
 
@@ -191,8 +206,9 @@ silent gap.
 ## Performance
 
 Measured on a developer machine with 414,000 files and 14 GB across roughly 4,000
-installed packages, a full scan takes about **6.5 minutes**, well inside the 900s default
-timeout. Smaller trees finish in seconds. `--verbose` reports elapsed seconds per stage,
+installed packages: about **6.5 minutes** for one large project tree (`--path ~/git`), and
+about **16 minutes** for a full default scan of every auto-detected root. Smaller trees
+finish in seconds. The default `--timeout` is 1800s so the second case completes. `--verbose` reports elapsed seconds per stage,
 so if a scan is slow you can see which stage owns the time — content matching is normally
 the largest share, since it is the only stage that reads every candidate file.
 
@@ -213,6 +229,13 @@ If a scan is slow, run with `--verbose` to see which root is responsible, then n
 with `--path` or lower `--max-depth`.
 
 ## Troubleshooting
+
+**A `CONFIRMED` finding on a file that is documentation, not malware**
+`CONTENT` signatures match distinctive strings from the campaign, and those strings appear
+in vendor advisories, IOC feeds, incident tickets, and this repository. A host storing any
+of that will produce content matches. Corroborate a content-only hit — a payload filename,
+a matching hash, or a persistence artifact alongside it — before treating a host as
+compromised, and use `--exclude` for directories you keep such material in.
 
 **Exit 1 with "unknown check type" or "SHA256 must be 64 hex characters"**
 A signature file has a malformed record; the message names the file and line. Malformed

@@ -29,7 +29,7 @@ jobs:
       # Third-party actions are pinned to a commit SHA, not a tag. A tag is a
       # mutable reference, and moving a tag under a consumer is precisely the
       # attack this repository exists to detect. Dependabot proposes SHA bumps.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install shellcheck (Linux)
         if: runner.os == 'Linux'
@@ -55,7 +55,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dash
         if: runner.os == 'Linux'
@@ -68,7 +68,7 @@ jobs:
     name: PowerShell port (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: PSScriptAnalyzer
         shell: pwsh

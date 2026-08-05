@@ -79,7 +79,11 @@ err() { printf '%s: %s\n' "$PROGNAME" "$*" >&2; }
 warn() { printf '%s: warning: %s\n' "$PROGNAME" "$*" >&2; }
 # Progress lines carry elapsed seconds so a slow stage is identifiable from the
 # output rather than by guesswork.
-info() { [ "$VERBOSE" -eq 1 ] && printf '%s: [%4ss] %s\n' "$PROGNAME" "$(elapsed)" "$*" >&2 || :; }
+info() {
+	if [ "$VERBOSE" -eq 1 ]; then
+		printf '%s: [%4ss] %s\n' "$PROGNAME" "$(elapsed)" "$*" >&2
+	fi
+}
 
 die() {
 	code=$1
@@ -953,7 +957,7 @@ check_lockfiles() {
 				[ "$_leaf" = "npm-shrinkwrap.json" ] || continue
 				;;
 			esac
-			[ -f "$lf" ] && [ -r "$lf" ] || continue
+			if [ ! -f "$lf" ] || [ ! -r "$lf" ]; then continue; fi
 			_sz=$(file_size "$lf")
 			if [ "$_sz" -gt "$MAX_FILE_SIZE" ]; then
 				info "lockfile skipped (over --max-file-size): $lf"
@@ -1131,7 +1135,7 @@ tally() {
 	COUNT_CONFIRMED=$(awk -F'|' '$1=="CONFIRMED"' "$FINDINGS_FILE" 2>/dev/null | wc -l | tr -d ' ')
 	COUNT_SUSPECT=$(awk -F'|' '$1=="SUSPECT"' "$FINDINGS_FILE" 2>/dev/null | wc -l | tr -d ' ')
 	COUNT_SKIPPED=$(wc -l <"$WORKDIR/skipped" 2>/dev/null | tr -d ' ' || printf '0')
-	[ -f "$WORKDIR/truncated" ] && TRUNCATED=1 || :
+	if [ -f "$WORKDIR/truncated" ]; then TRUNCATED=1; fi
 	: "${COUNT_CONFIRMED:=0}" "${COUNT_SUSPECT:=0}" "${COUNT_SKIPPED:=0}"
 }
 

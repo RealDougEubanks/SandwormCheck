@@ -587,8 +587,12 @@ function Get-ProcessTable {
         }
     } else {
         try {
-            $out = & ps -Ao 'pid=,ppid=,args=' 2>$null
-            if (-not $out) { $out = & ps ax -o 'pid=,ppid=,args=' 2>$null }
+            # Invoked through a variable, and by absolute path where available:
+            # on Windows "ps" is an alias for Get-Process, so a bare call trips
+            # PSAvoidUsingCmdletAliases even though this branch is Unix-only.
+            $psBin = if (Test-Path '/bin/ps') { '/bin/ps' } else { 'ps' }
+            $out = & $psBin -Ao 'pid=,ppid=,args=' 2>$null
+            if (-not $out) { $out = & $psBin ax -o 'pid=,ppid=,args=' 2>$null }
             if (-not $out) { throw 'ps produced no output' }
             foreach ($line in $out) {
                 $t = $line.Trim() -split '\s+', 3

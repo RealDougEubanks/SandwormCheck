@@ -78,7 +78,11 @@ else
 	_bad=0
 	for f in $SH_FILES; do
 		[ -f "$f" ] || continue
-		if ! shellcheck -s sh "$f"; then _bad=1; fi
+		# --severity=warning so the gate means the same thing across shellcheck
+		# versions. Distros ship different releases with different info-level
+		# checks enabled, and CI breaking because Ubuntu bumped a package is noise,
+		# not signal. Warnings and errors still fail.
+		if ! shellcheck -s sh --severity=warning "$f"; then _bad=1; fi
 	done
 	if [ "$_bad" -eq 0 ]; then
 		pass "shellcheck -s sh"

@@ -42,17 +42,35 @@ trap 'rm -rf "$WORK"' EXIT
 normalize() {
 	# A Socket-style CSV is detected by its header rather than by file extension.
 	if head -1 "$1" | grep -qi '^ecosystem,namespace,name,version'; then
-		awk -F',' '
+		# Only npm rows are taken. Socket's feed gained a golang section on
+		# 2026-08-05 when the worm moved into the maintainer's Go repositories, and
+		# a Go module version (v0.0.0-20260805040439-27421527967b) is neither valid
+		# in a PKGVER record nor something this scanner reads: PKGVER matches
+		# package.json and npm-family lockfiles only. Ingesting them would either
+		# bloat the signature set with records that can never match, or fail the
+		# generator's validation. Skipped rows are COUNTED and reported, never
+		# dropped in silence -- see docs/references.md for the ecosystem note.
+		awk -F',' -v other="$WORK/skipped-eco" '
 			NR == 1 { next }
 			{
-				ns = $2; nm = $3; ver = $4
+				eco = $1; ns = $2; nm = $3; ver = $4
+				gsub(/^[ \t"]+|[ \t"\r]+$/, "", eco)
 				gsub(/^[ \t"]+|[ \t"\r]+$/, "", ns)
 				gsub(/^[ \t"]+|[ \t"\r]+$/, "", nm)
 				gsub(/^[ \t"]+|[ \t"\r]+$/, "", ver)
 				if (nm == "" || ver == "") next
+				if (tolower(eco) != "npm") { print tolower(eco) >> other; next }
 				print (ns == "" ? nm : ns "/" nm) "@" ver
 			}
 		' "$1"
+		if [ -s "$WORK/skipped-eco" ]; then
+			printf '%s: %s: skipped %s non-npm row(s):' "$PROGNAME" "$1" \
+				"$(wc -l <"$WORK/skipped-eco" | tr -d ' ')" >&2
+			sort "$WORK/skipped-eco" | uniq -c | awk '{printf " %s(%s)", $2, $1}' >&2
+			printf '\n%s:   this scanner reads npm manifests and lockfiles only; see docs/references.md\n' \
+				"$PROGNAME" >&2
+			: >"$WORK/skipped-eco"
+		fi
 	else
 		awk '{ sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "") } NF && $0 !~ /^#/ { print }' "$1"
 	fi

@@ -57,14 +57,82 @@ function Write-RunLog {
     [Console]::Error.WriteLine("run-latest: $Message")
 }
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-RunLog "git not found; install git or pre-stage the repository at $Dest"
-    exit 1
+# Zip fallback for hosts without git. GitHub serves a snapshot of any ref at
+# codeload, so a machine with no git can still stay current. Downloading a zip
+# gives no history and no signature verification, which is the same trust level as
+# a shallow clone over HTTPS, so nothing is lost by preferring it as a fallback.
+function Update-FromZip {
+    param([string] $Repo, [string] $Ref, [string] $Dest)
+
+    # https://github.com/OWNER/REPO(.git) -> OWNER/REPO
+    $slug = $Repo -replace '^https://github\.com/', '' -replace '\.git$', ''
+    if ($slug -notmatch '^[^/]+/[^/]+$') {
+        Write-RunLog "cannot derive an archive URL from $Repo; use git or pre-stage $Dest"
+        return $false
+    }
+
+    # A tag and a branch live under different prefixes; try tag first so a pinned
+    # release wins, which is what a production fleet should be using.
+    $urls = @(
+        "https://codeload.github.com/$slug/zip/refs/tags/$Ref",
+        "https://codeload.github.com/$slug/zip/refs/heads/$Ref"
+    )
+
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("swc-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $zip = Join-Path $tmp 'src.zip'
+    try {
+        $got = $false
+        foreach ($u in $urls) {
+            try {
+                # TLS 1.2 is not the default on Windows PowerShell 5.1.
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $u -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                $got = $true
+                Write-RunLog "downloaded $u"
+                break
+            } catch {
+                continue
+            }
+        }
+        if (-not $got) { Write-RunLog "could not download an archive for ref '$Ref'"; return $false }
+
+        Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force -ErrorAction Stop
+        # The archive contains a single REPO-REF directory.
+        $inner = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
+        if (-not $inner) { Write-RunLog 'archive contained no directory'; return $false }
+        if (-not (Test-Path (Join-Path $inner.FullName 'SandwormCheck.ps1'))) {
+            Write-RunLog 'archive does not look like SandwormCheck; refusing to install it'
+            return $false
+        }
+
+        # Replace only after the download has been validated, so a failed update
+        # leaves the previous working copy intact.
+        if (Test-Path -LiteralPath $Dest) { Remove-Item -Recurse -Force $Dest -ErrorAction SilentlyContinue }
+        $parent = Split-Path -Parent $Dest
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        Move-Item -LiteralPath $inner.FullName -Destination $Dest -Force
+        return $true
+    } catch {
+        Write-RunLog "zip update failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+$hasGit = [bool] (Get-Command git -ErrorAction SilentlyContinue)
+if (-not $hasGit) {
+    Write-RunLog 'git not found; falling back to a zip download'
 }
 
 $updated = $false
 $gitOut = $null
-if (Test-Path -LiteralPath (Join-Path $Dest '.git')) {
+if (-not $hasGit) {
+    $updated = Update-FromZip -Repo $Repo -Ref $Ref -Dest $Dest
+} elseif (Test-Path -LiteralPath (Join-Path $Dest '.git')) {
     # Discard local drift so a half-applied earlier run cannot pin old signatures.
     # Keep git's own diagnostics: "could not update" without the reason leaves an
     # operator with nothing to act on.
@@ -81,6 +149,13 @@ if (Test-Path -LiteralPath (Join-Path $Dest '.git')) {
     }
     $gitOut = git clone --quiet --depth 1 --branch $Ref $Repo $Dest 2>&1
     if ($LASTEXITCODE -eq 0) { $updated = $true }
+}
+
+# A git host that failed to update can still fall back to the archive rather than
+# scanning with a stale copy.
+if (-not $updated -and $hasGit) {
+    Write-RunLog 'git update failed; trying the zip fallback'
+    $updated = Update-FromZip -Repo $Repo -Ref $Ref -Dest $Dest
 }
 
 $scanner = Join-Path $Dest 'SandwormCheck.ps1'
@@ -103,8 +178,13 @@ if (-not (Test-Path -LiteralPath $scanner)) {
     exit 1
 }
 
-$rev = (git -C $Dest rev-parse --short HEAD 2>$null)
-if (-not $rev) { $rev = 'unknown' }
+$rev = 'unknown'
+if ($hasGit -and (Test-Path -LiteralPath (Join-Path $Dest '.git'))) {
+    $r = (git -C $Dest rev-parse --short HEAD 2>$null)
+    if ($r) { $rev = $r }
+} elseif ($updated) {
+    $rev = "archive of $Ref"
+}
 Write-RunLog "revision $rev"
 
 # Invoking the script directly keeps this working on Windows PowerShell 5.1 and

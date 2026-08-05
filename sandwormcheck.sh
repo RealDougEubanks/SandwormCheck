@@ -611,30 +611,80 @@ sigs_of_type() {
 # ---------------------------------------------------------------------------
 # Scan roots
 # ---------------------------------------------------------------------------
-default_scan_paths() {
-	_out=""
-	for d in /Users /home; do
-		[ -d "$d" ] || continue
-		for h in "$d"/*; do
-			# Skip macOS pseudo-users and non-directories.
-			[ -d "$h" ] || continue
-			case $(basename "$h") in
-			Shared | Guest | .*) continue ;;
-			esac
-			_out="$_out$h
-"
+enumerate_homes() {
+	# Every account's home directory, from the OS user database.
+	#
+	# Globbing /Users/* and /home/* misses real accounts: macOS root lives in
+	# /var/root (not /root), and directory-service or network accounts can have a
+	# home anywhere. Persistence for this campaign is per-user
+	# (~/.config/gh-token-monitor, ~/Library/LaunchAgents/...), so a missed home is
+	# a missed compromise on that account -- and the scanner runs as root precisely
+	# to cover every account.
+	#
+	# Output: one absolute path per line, existing directories only.
+	{
+		if command -v dscl >/dev/null 2>&1; then
+			# macOS. One call, "name path" per line.
+			dscl . -list /Users NFSHomeDirectory 2>/dev/null | awk 'NF>=2 {print $2}'
+		fi
+		if command -v getent >/dev/null 2>&1; then
+			getent passwd 2>/dev/null | awk -F: 'NF>=6 {print $6}'
+		elif [ -r /etc/passwd ]; then
+			awk -F: 'NF>=6 && $1 !~ /^#/ {print $6}' /etc/passwd 2>/dev/null
+		fi
+		# Belt and braces: the conventional locations, in case the user database is
+		# unavailable (a minimal container, say).
+		for _d in /Users /home /export/home; do
+			[ -d "$_d" ] || continue
+			for _h in "$_d"/*; do
+				[ -d "$_h" ] && printf '%s\n' "$_h"
+			done
 		done
-	done
-	[ -n "${HOME:-}" ] && [ -d "${HOME:-}" ] && _out="$_out$HOME
-"
-	[ -d /root ] && _out="$_out/root
-"
-	for d in /opt /srv /var/www /usr/local/lib/node_modules; do
-		[ -d "$d" ] && _out="$_out$d
-"
-	done
-	# De-duplicate while preserving order.
-	printf '%s' "$_out" | awk 'NF && !seen[$0]++'
+		[ -d /root ] && printf '/root\n'
+		[ -d /var/root ] && printf '/var/root\n'
+		[ -n "${HOME:-}" ] && printf '%s\n' "$HOME"
+	} 2>/dev/null |
+		while IFS= read -r _hp; do
+			[ -n "$_hp" ] || continue
+			# Pseudo-homes used by service accounts that hold nothing.
+			case $_hp in
+			/ | /var/empty | /dev/null | /nonexistent | /usr/bin/false | /sbin/nologin) continue ;;
+			esac
+			[ -d "$_hp" ] || continue
+			printf '%s\n' "$_hp"
+		done | awk 'NF && !seen[$0]++'
+}
+
+walk_homes() {
+	# Homes used as WALK roots: those in the conventional user-home locations, plus
+	# root's home on either platform.
+	#
+	# Selected by LOCATION rather than by UID. A UID threshold looked principled but
+	# silently dropped accounts like /Users/HDHomeRun that the previous globbing had
+	# always walked -- a coverage regression disguised as a refinement. Location is
+	# also predictable: an operator can tell at a glance what will be scanned.
+	#
+	# Service-account homes under /var/db, /var/lib and similar are deliberately not
+	# walked: there are hundreds and some are large, and walking them would push a
+	# fleet scan past any sane timeout. They remain covered by the PATHEXISTS
+	# checks, which are path lookups rather than walks and run against EVERY home
+	# from enumerate_homes(), so a per-user implant on a service account is still
+	# detected.
+	enumerate_homes | while IFS= read -r _h; do
+		[ -n "$_h" ] || continue
+		case $_h in
+		/Users/* | /home/* | /export/home/* | /root | /var/root) printf '%s\n' "$_h" ;;
+		esac
+	done | awk 'NF && !seen[$0]++'
+}
+
+default_scan_paths() {
+	{
+		walk_homes
+		for d in /opt /srv /var/www /usr/local/lib/node_modules; do
+			[ -d "$d" ] && printf '%s\n' "$d"
+		done
+	} | awk 'NF && !seen[$0]++'
 }
 
 walk() {
@@ -1528,14 +1578,11 @@ main() {
 		die "$EXIT_ERROR" "no scannable roots found; pass --path explicitly"
 
 	# Home directories used to expand ~ in PATHEXISTS patterns.
-	HOMES=$(
-		for d in /Users /home; do
-			[ -d "$d" ] && find "$d" -maxdepth 1 -mindepth 1 -type d 2>/dev/null
-		done
-		[ -d /root ] && printf '/root\n'
-		[ -n "${HOME:-}" ] && printf '%s\n' "$HOME"
-	)
-	HOMES=$(printf '%s\n' "$HOMES" | awk 'NF && !seen[$0]++')
+	# Every account, including service accounts: PATHEXISTS checks are path lookups
+	# rather than walks, so covering them all is cheap and a per-user implant on a
+	# service account is still found.
+	HOMES=$(enumerate_homes)
+	info "$(printf '%s\n' "$HOMES" | awk 'NF' | wc -l | tr -d ' ') home director(ies) for per-user checks"
 
 	build_exclusions
 	build_file_lists

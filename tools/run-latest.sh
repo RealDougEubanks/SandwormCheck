@@ -27,10 +27,82 @@ REF=${SWC_REF:-main}
 
 log() { printf 'run-latest: %s\n' "$*" >&2; }
 
-command -v git >/dev/null 2>&1 || {
-	log "git not found; install git or pre-stage the repository at $DEST"
-	exit 1
+# Zip fallback for hosts without git. GitHub serves a snapshot of any ref at
+# codeload, so a machine with no git can still stay current. An archive carries no
+# history and no signature, which is the same trust level as a shallow clone over
+# HTTPS, so nothing is given up by using it as a fallback.
+update_from_zip() {
+	_slug=$(printf '%s' "$REPO" | sed -e 's#^https://github\.com/##' -e 's#\.git$##')
+	case $_slug in
+	*/*) ;;
+	*)
+		log "cannot derive an archive URL from $REPO; use git or pre-stage $DEST"
+		return 1
+		;;
+	esac
+
+	_fetch=""
+	if command -v curl >/dev/null 2>&1; then
+		_fetch=curl
+	elif command -v wget >/dev/null 2>&1; then
+		_fetch=wget
+	else
+		log "neither git, curl, nor wget is available; cannot update"
+		return 1
+	fi
+	command -v unzip >/dev/null 2>&1 || {
+		log "unzip not available; cannot expand the archive"
+		return 1
+	}
+
+	_tmp=$(mktemp -d "${TMPDIR:-/tmp}/swc-zip.XXXXXX") || return 1
+	# A tag and a branch live under different prefixes; try the tag first so a
+	# pinned release wins, which is what a production fleet should be using.
+	for _u in "https://codeload.github.com/$_slug/zip/refs/tags/$REF" \
+		"https://codeload.github.com/$_slug/zip/refs/heads/$REF"; do
+		if [ "$_fetch" = curl ]; then
+			curl -fsSL "$_u" -o "$_tmp/src.zip" 2>/dev/null && break
+		else
+			wget -q "$_u" -O "$_tmp/src.zip" 2>/dev/null && break
+		fi
+		rm -f "$_tmp/src.zip"
+	done
+	[ -s "$_tmp/src.zip" ] || {
+		log "could not download an archive for ref '$REF'"
+		rm -rf "$_tmp"
+		return 1
+	}
+
+	unzip -q "$_tmp/src.zip" -d "$_tmp/x" 2>/dev/null || {
+		log "could not expand the archive"
+		rm -rf "$_tmp"
+		return 1
+	}
+	_inner=$(find "$_tmp/x" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
+	if [ -z "$_inner" ] || [ ! -f "$_inner/sandwormcheck.sh" ]; then
+		log "archive does not look like SandwormCheck; refusing to install it"
+		rm -rf "$_tmp"
+		return 1
+	fi
+
+	# Replace only after the download has been validated, so a failed update leaves
+	# the previous working copy intact.
+	rm -rf "$DEST" 2>/dev/null || :
+	mkdir -p "$(dirname "$DEST")" 2>/dev/null || :
+	mv "$_inner" "$DEST" || {
+		log "could not install to $DEST"
+		rm -rf "$_tmp"
+		return 1
+	}
+	chmod +x "$DEST/sandwormcheck.sh" 2>/dev/null || :
+	rm -rf "$_tmp"
+	log "installed archive of $REF"
+	return 0
 }
+
+HAS_GIT=0
+command -v git >/dev/null 2>&1 && HAS_GIT=1
+[ "$HAS_GIT" -eq 1 ] || log "git not found; falling back to a zip download"
 
 # Keep git's own diagnostics: "could not update" without the reason leaves an
 # operator with nothing to act on.
@@ -38,7 +110,9 @@ GITLOG=$(mktemp "${TMPDIR:-/tmp}/swc-git.XXXXXX") || GITLOG=/dev/null
 trap 'rm -f "$GITLOG"' EXIT
 
 updated=0
-if [ -d "$DEST/.git" ]; then
+if [ "$HAS_GIT" -eq 0 ]; then
+	update_from_zip && updated=1
+elif [ -d "$DEST/.git" ]; then
 	# Discard local drift so a half-applied earlier run cannot pin old signatures.
 	if git -C "$DEST" fetch --quiet --depth 1 origin "$REF" >"$GITLOG" 2>&1 &&
 		git -C "$DEST" reset --hard --quiet FETCH_HEAD >>"$GITLOG" 2>&1; then
@@ -54,6 +128,13 @@ fi
 
 if [ "$updated" -eq 0 ] && [ -s "$GITLOG" ]; then
 	log "git said: $(head -2 "$GITLOG" | tr '\n' ' ')"
+fi
+
+# A git host whose update failed can still fall back to the archive rather than
+# scanning with a stale copy.
+if [ "$updated" -eq 0 ] && [ "$HAS_GIT" -eq 1 ]; then
+	log "git update failed; trying the zip fallback"
+	update_from_zip && updated=1
 fi
 
 if [ "$updated" -eq 0 ]; then
@@ -73,7 +154,11 @@ fi
 	exit 1
 }
 
-log "revision $(git -C "$DEST" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+if [ "$HAS_GIT" -eq 1 ] && [ -d "$DEST/.git" ]; then
+	log "revision $(git -C "$DEST" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+else
+	log "revision archive of $REF"
+fi
 
 # shellcheck disable=SC2086  # SWC_ARGS is intentionally word-split
 sh "$DEST/sandwormcheck.sh" ${SWC_ARGS:-}

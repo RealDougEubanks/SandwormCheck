@@ -255,9 +255,20 @@ Scanning an entire disk for `node_modules` is slow enough that fleet operators w
 disable it. Default scope:
 
 **Package/project roots** (recursive, depth-bounded):
-- Every real user home directory (`/Users/*` on macOS, `/home/*` on Linux, plus
-  `$HOME` and root's home)
+- Every home directory in a conventional user-home location, taken from the OS user
+  database (`dscl` on macOS, `getent`/`/etc/passwd` elsewhere) rather than by globbing:
+  `/Users/*`, `/home/*`, `/export/home/*`, plus `/root` and `/var/root`. Globbing missed
+  macOS's root account (home `/var/root`, not `/root`) and any directory-service account
+  with a home elsewhere.
 - `/opt`, `/srv`, `/var/www`, `/usr/local/lib/node_modules`
+
+**Per-user checks cover EVERY account**, not just the walked ones. `PATHEXISTS` patterns
+beginning `~/` are expanded against every home in the user database, including service
+accounts whose homes live under `/var/db` or `/var/lib`. Those homes are not *walked* --
+there are hundreds and some are large -- but a path lookup is cheap, so per-user
+persistence (`~/.config/gh-token-monitor`, `~/Library/LaunchAgents/...`) is still detected
+on a service account. Walk roots are selected by location rather than by UID: a UID
+threshold silently dropped accounts that had previously been covered.
 
 A scan root that is a **symlink is followed** (`find -H`); symlinks *inside* the tree are
 not. Following inner links would let one pull the scan outside its root and permit cycles.

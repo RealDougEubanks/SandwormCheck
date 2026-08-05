@@ -72,6 +72,25 @@
   worse. See the table in `docs/spec.md` section 11. `--verbose` now reports elapsed
   seconds per stage so regressions are visible.
 
+## Go ecosystem support
+
+The campaign crossed into Go on 2026-08-05: Socket's feed lists 21 golang entries across 8
+modules, including the maintainer's own `github.com/jaredwray/{keyv,cacheable,ecto}`. See
+`docs/references.md`.
+
+Dependency detection here is npm-only. Adding Go would mean:
+
+- a `GOMODVER` check type parsing `go.mod` and `go.sum`, whose version syntax
+  (`v0.0.0-20260805040439-27421527967b`, `+incompatible` suffixes) does not fit `PKGVER`;
+- module paths as identifiers (`github.com/owner/repo`) rather than package names, so the
+  scoped-basename reasoning that governs the lockfile matcher does not transfer;
+- lifting the npm-only filter in `tools/merge-package-list.sh`, which currently skips and
+  reports non-npm rows.
+
+Worth doing only if Go services in the fleet consume those modules. Until then the artifact
+signatures still catch a Go-delivered infection by its payload, persistence, or process --
+just not by its manifest. Stated in the README rather than left implicit.
+
 ## Known false-positive sources
 
 - **Documentation about the campaign matches the campaign.** `CONTENT` signatures look for

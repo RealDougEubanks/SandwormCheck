@@ -79,6 +79,49 @@ At the time of collection **OSV.dev held no advisories for this campaign at all*
 GHSA, no `MAL-`, no CVE. Worth re-querying, since an OSV feed would be the cleanest
 long-term source.
 
+## The campaign crossed into the Go ecosystem (2026-08-05)
+
+Re-pulling Socket's feed on 2026-08-05 showed a new `Ecosystem` value. It now carries
+**21 golang entries across 8 modules** that were not present on 2026-08-04:
+
+```
+github.com/jaredwray/keyv            github.com/jaredwray/cacheable
+github.com/jaredwray/ecto            github.com/juxtaposition1/v.a.p.e  (9 versions)
+github.com/adieuu-llc/adieuu-2026    github.com/evilgodfahim/kal
+github.com/techtoboggan/claude-desktop-hardened-linux
+github.com/rainb0w-clwn/node-cache-manager-fs-binary-ts
+```
+
+The first three are the **same maintainer's Go repositories** as the original npm
+packages: the stolen credentials were used to move sideways out of npm rather than only
+deeper into it. The rest look like onward community spread.
+
+Socket's detection window at that point ran `2026-08-04T09:41` to `2026-08-05T11:02`, so
+the campaign was still adding entries a day later.
+
+**What this scanner does and does not cover.** `PKGVER` reads `package.json` and the
+npm-family lockfiles, so a Go module is out of scope: a Go pseudo-version such as
+`v0.0.0-20260805040439-27421527967b` is not something any file this scanner parses will
+contain. The *artifact* signatures are ecosystem-agnostic — payload filenames and hashes,
+the `gh-token-monitor` persistence chain, the C2 domains, the running-process checks — so a
+Go-delivered infection dropping the same payload is still detected by its artifacts, just
+not by its manifest. That is a partial gap, not blindness, and it is recorded in
+`docs/ToDo.md`.
+
+`tools/merge-package-list.sh` filters the feed to npm rows and **reports** how many it
+skipped and from which ecosystem. It does not drop them silently.
+
+## npm coverage as of 2026-08-05
+
+| Source | Pairs | Names |
+|---|---|---|
+| Socket feed, npm rows | 2,236 | 444 |
+| Wiz IOC CSV | 2,235 | 443 |
+| **This repository** | **2,255** | **463** |
+
+Zero npm pairs in either live feed are missing from the committed list; the 19 extra here
+are the `@keyv/*` scope that both Wiz and Socket omit and only JFrog published.
+
 ## Discrepancies noted while encoding
 
 - Wiz labels three 40-hex-character values as SHA256. They are 40 chars, so they are

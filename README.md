@@ -34,8 +34,13 @@ cd SandwormCheck
 "exit code: $LASTEXITCODE"
 ```
 
-With no arguments it scans user home directories and common deployment paths. Run it as
-root or Administrator to cover every user profile on the machine.
+With no arguments it scans every user's home directory plus common deployment paths. Run it
+as **root** (or Administrator) so it can read all of them — home directories are where this
+campaign's per-user persistence lives.
+
+Home directories come from the OS user database (`dscl` on macOS, `getent`/`/etc/passwd`
+elsewhere), not from globbing `/Users/*`, so accounts with a home outside the usual
+locations are covered — including macOS's root account, whose home is `/var/root`.
 
 ## Exit codes
 
@@ -80,6 +85,18 @@ what, and [docs/references.md](docs/references.md) for per-indicator provenance.
   project that pins a bad version without having installed it is still caught. Covers
   `package-lock.json` (v1/v2/v3), `npm-shrinkwrap.json`, `yarn.lock` (v1 and berry),
   `pnpm-lock.yaml` (v5/v6/v9), `bun.lock`, and `bun.lockb`.
+
+### Ecosystem scope
+
+Dependency detection is **npm-only**: `package.json` plus the npm, yarn, pnpm, and bun
+lockfiles. On 2026-08-05 the campaign crossed into Go — including the same maintainer's
+`github.com/jaredwray/{keyv,cacheable,ecto}` — and those modules are **not** matched by
+version here.
+
+The artifact signatures are ecosystem-agnostic, so a Go-delivered infection that drops the
+same payload, persistence chain, or running process is still detected. It is the manifest
+check that is npm-specific. See [docs/references.md](docs/references.md) and
+[docs/ToDo.md](docs/ToDo.md).
 
 ### What it does not do
 
@@ -208,6 +225,22 @@ if ($null -eq $LASTEXITCODE) {
 }
 exit $LASTEXITCODE
 ```
+
+### If git is not installed
+
+Both `tools/run-latest.*` fall back to downloading a zip of the ref from
+`codeload.github.com`, expanding it, and running from that. A git host that fails to
+update also falls back rather than scanning with a stale copy. The archive is validated
+(it must actually contain the scanner) before the previous copy is replaced, so a failed
+update leaves a working install in place.
+
+An archive carries no history and no signature — the same trust level as a shallow clone
+over HTTPS, so nothing is given up. On Unix the fallback needs `curl` or `wget` plus
+`unzip`; on Windows it uses `Invoke-WebRequest` and `Expand-Archive`, with TLS 1.2 forced
+because Windows PowerShell 5.1 does not default to it.
+
+The inline snippets above use git only. Use `tools/run-latest.sh` /
+`tools/run-latest.ps1` if any of your fleet lacks git.
 
 ### Two things to get right
 

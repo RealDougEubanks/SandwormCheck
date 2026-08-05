@@ -465,6 +465,67 @@ EOF
 	expect_out "Shai-Hulud" "the original campaign is still listed"
 }
 
+test_gnu_stat_compat() {
+	section "GNU stat compatibility"
+
+	# The scanner once chained `stat -f '%z' || stat -c '%s'` for file sizes, which
+	# is correct on BSD and silently wrong on GNU, where -f means --file-system.
+	# The result was a multi-line string, an errored numeric comparison, and
+	# --max-file-size not being enforced on any Linux host. macOS-only testing
+	# missed it; CI on Linux caught it. This replays the GNU path from any host.
+	_shim="$TESTDIR/shims/gnu-stat"
+	if [ ! -x "$_shim/stat" ]; then
+		printf '  skip (GNU stat shim not present)\n'
+		return 0
+	fi
+	if [ "$(uname -s)" = "Linux" ]; then
+		printf '  skip (on Linux the native GNU path is already covered)\n'
+		return 0
+	fi
+
+	mkdir -p "$TMP/gnulock/proj"
+	{
+		printf '{"lockfileVersion":3,"packages":{"node_modules/keyv":{"version":"6.0.0",'
+		printf '"resolved":"https://registry.npmjs.org/keyv/-/keyv-6.0.0.tgz","integrity":"sha512-'
+		_i=0
+		while [ "$_i" -lt 40 ]; do
+			printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+			_i=$((_i + 1))
+		done
+		printf '=="}}}\n'
+	} >"$TMP/gnulock/proj/package-lock.json"
+
+	PATH="$_shim:$PATH" "$CURRENT_SHELL" "$SCANNER" --path "$TMP/gnulock" \
+		--signatures "$SIGS" --max-file-size 1024 --quiet --no-color >"$TMP/out" 2>"$TMP/err"
+	_got=$?
+	if [ "$_got" -eq 0 ]; then
+		ok "GNU stat: oversized lockfile skipped, --max-file-size honoured"
+	else
+		no "GNU stat: oversized lockfile skipped" "expected exit 0, got $_got"
+	fi
+
+	PATH="$_shim:$PATH" "$CURRENT_SHELL" "$SCANNER" --path "$TMP/gnulock" \
+		--signatures "$SIGS" --quiet --no-color >"$TMP/out" 2>"$TMP/err"
+	_got=$?
+	if [ "$_got" -eq 10 ]; then
+		ok "GNU stat: the same lockfile is read when under the cap"
+	else
+		no "GNU stat: the same lockfile is read when under the cap" "expected exit 10, got $_got"
+	fi
+
+	# A silently empty candidate list would make content and hash checks do nothing
+	# while the scan still reported a verdict.
+	PATH="$_shim:$PATH" "$CURRENT_SHELL" "$SCANNER" --path "$FIX/confirmed" \
+		--signatures "$SIGS" --verbose --quiet --no-color >"$TMP/out" 2>"$TMP/err"
+	_counts=$(grep -oE '[0-9]+ content, [0-9]+ hash' "$TMP/err" | tail -1)
+	case ${_counts:-} in
+	"0 content, 0 hash" | "")
+		no "GNU stat: candidate lists are populated" "got '${_counts:-<none>}'"
+		;;
+	*) ok "GNU stat: candidate lists are populated ($_counts)" ;;
+	esac
+}
+
 test_no_network() {
 	section "no network egress [$CURRENT_SHELL]"
 
@@ -749,6 +810,7 @@ done
 # These are interpreter-independent, so run them once.
 CURRENT_SHELL="sh"
 test_no_network
+test_gnu_stat_compat
 test_powershell_parity
 
 printf '\n===============================\n'

@@ -74,10 +74,14 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path ./SandwormCheck.ps1, ./tools/run-latest.ps1 `
-            -Settings ./PSScriptAnalyzerSettings.psd1 -Severity Error,Warning
+          # -Path takes a single string in the shipped version, not an array.
+          $issues = @()
+          foreach ($f in @('./SandwormCheck.ps1', './tools/run-latest.ps1')) {
+            $issues += Invoke-ScriptAnalyzer -Path $f `
+              -Settings ./PSScriptAnalyzerSettings.psd1 -Severity Error,Warning
+          }
           $issues | Format-Table -AutoSize
-          if ($issues) { exit 1 }
+          if ($issues.Count -gt 0) { exit 1 }
 
       # Windows PowerShell 5.1 reads a BOM-less file as ANSI, so a non-ASCII byte
       # can corrupt surrounding string literals only on this platform.

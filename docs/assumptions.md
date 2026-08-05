@@ -371,3 +371,21 @@ missed it entirely.
 Cheap to add, since the logs are few and small.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** `file_size()` selects the stat flavour from the mode probed at startup and
+falls back to `wc -c`, rather than chaining `stat -f || stat -c`.
+**Why:** The chained form is correct on BSD and silently wrong on GNU, where `-f` means
+`--file-system` and a BSD format string is therefore taken as a *filename*. GNU printed
+filesystem details for the real file and failed on the bogus one, so the fallback appended
+the real size to that output. The caller received a multi-line string, the numeric
+comparison errored, and `--max-file-size` stopped being enforced on every Linux host.
+Developed and tested only on macOS, this was invisible until CI ran on Linux.
+`probe_stat` now probes GNU first, because a BSD-first probe is ambiguous on GNU rather
+than cleanly failing. A total failure reports size 0, which makes a file look small and so
+gets it scanned rather than skipped — for a detection tool, erring toward doing the work is
+the safe direction. `tests/shims/gnu-stat/` replays the GNU path from a BSD host so this
+cannot regress.
+**Recorded by:** Claude
+**Date:** 2026-08-05

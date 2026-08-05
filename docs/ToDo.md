@@ -26,7 +26,11 @@
   left out because linger is legitimately enabled on many hosts and would false-positive.
 - **No npm cache tarball inspection.** A malicious tarball sitting in `~/.npm/_cacache`
   is not detected unless it has been extracted. Worth adding as a `SUSPECT` check.
-- **The Windows port has only been exercised via PowerShell 7 on macOS.** The logic is
+- **The Windows port has not yet completed a run on real Windows.** The first CI attempt
+  failed before reaching the scanner, on a bug in the workflow itself
+  (`Invoke-ScriptAnalyzer -Path` takes a single string, not an array). Fixed; awaiting a
+  green run.
+- **Previously: the Windows port had only been exercised via PowerShell 7 on macOS.** The logic is
   path-agnostic and the parity tests pass, but it has not run on Windows PowerShell 5.1 on
   a real Windows host. Validate before relying on it for a Windows fleet.
 

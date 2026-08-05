@@ -269,18 +269,45 @@ hash_file() {
 }
 
 file_size() {
-	# Portable size in bytes; BSD stat and GNU stat differ.
-	stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null || printf '0'
+	# Size in bytes. Always yields a non-negative integer.
+	#
+	# The previous form chained `stat -f '%z' || stat -c '%s'`, which is wrong on
+	# GNU: there -f means --file-system, so '%z' was taken as a FILENAME. GNU stat
+	# printed filesystem details for the real file AND failed on the bogus one, so
+	# the fallback appended the real size to that output. The caller received a
+	# multi-line string, the numeric comparison errored, and --max-file-size
+	# silently stopped being enforced on Linux. Caught by CI, not by review.
+	_fs=""
+	if [ "$STAT_MODE" = "gnu" ]; then
+		_fs=$(stat -c '%s' "$1" 2>/dev/null)
+	elif [ "$STAT_MODE" = "bsd" ]; then
+		_fs=$(stat -f '%z' "$1" 2>/dev/null)
+	fi
+	# POSIX fallback whenever stat gave nothing usable. wc -c on a redirect uses
+	# fstat for regular files, so it does not read the contents.
+	case ${_fs:-} in
+	'' | *[!0-9]*) _fs=$(wc -c <"$1" 2>/dev/null | tr -d ' \t') ;;
+	esac
+	# If even that failed, report 0. That makes the file look small, so it is
+	# scanned rather than skipped: for a detection tool, erring toward doing the
+	# work is the safe direction.
+	case ${_fs:-} in
+	'' | *[!0-9]*) _fs=0 ;;
+	esac
+	printf '%s' "$_fs"
 }
 
 probe_stat() {
 	# Pick the batched stat form once. BSD and GNU stat take different flags but
 	# both accept many paths per invocation, which is what makes size filtering
 	# affordable on a large tree.
-	if stat -f '%z' . >/dev/null 2>&1; then
-		STAT_MODE="bsd"
-	elif stat -c '%s' . >/dev/null 2>&1; then
+	# GNU is probed FIRST because its -f flag means --file-system and would
+	# misinterpret a BSD-style format string as a filename, making a
+	# BSD-first probe ambiguous rather than cleanly failing.
+	if stat -c '%s' . >/dev/null 2>&1; then
 		STAT_MODE="gnu"
+	elif stat -f '%z' . >/dev/null 2>&1; then
+		STAT_MODE="bsd"
 	else
 		STAT_MODE=""
 		warn "no usable stat(1); --max-file-size will be enforced one file at a time"

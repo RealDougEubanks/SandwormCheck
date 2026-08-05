@@ -1,0 +1,48 @@
+#!/bin/sh
+# A stat(1) that behaves like GNU coreutils, for use on a BSD host.
+#
+# Exists because the scanner shipped a file_size() that chained
+#   stat -f '%z' || stat -c '%s'
+# which is correct on BSD and quietly wrong on GNU: there -f means
+# --file-system, so '%z' was taken as a FILENAME. GNU printed filesystem details
+# for the real file and failed on the bogus one, so the fallback appended the real
+# size to that output. The caller received a multi-line string, the numeric
+# comparison errored, and --max-file-size stopped being enforced on Linux.
+#
+# macOS-only testing would never catch that. This shim lets the suite exercise the
+# GNU code path from a BSD machine.
+
+if [ "$1" = "-c" ]; then
+	fmt=$2
+	shift 2
+	rc=0
+	for f in "$@"; do
+		if [ ! -e "$f" ]; then
+			echo "stat: cannot statx '$f': No such file or directory" >&2
+			rc=1
+			continue
+		fi
+		sz=$(/usr/bin/stat -f '%z' "$f" 2>/dev/null)
+		out=$(printf '%s' "$fmt" | sed -e "s|%s|$sz|g" -e "s|%n|$f|g")
+		printf '%b\n' "$out"
+	done
+	exit $rc
+fi
+
+if [ "$1" = "-f" ]; then
+	# GNU: --file-system. A BSD-style format string lands here as a filename.
+	shift
+	rc=0
+	for f in "$@"; do
+		if [ -e "$f" ]; then
+			echo "  File: \"$f\""
+			echo "    ID: deadbeef Namelen: 255     Type: apfs"
+		else
+			echo "stat: cannot read file system information for '$f': No such file or directory" >&2
+			rc=1
+		fi
+	done
+	exit $rc
+fi
+
+exec /usr/bin/stat "$@"

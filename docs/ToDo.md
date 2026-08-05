@@ -72,6 +72,22 @@
   worse. See the table in `docs/spec.md` section 11. `--verbose` now reports elapsed
   seconds per stage so regressions are visible.
 
+## Known false-positive sources
+
+- **Documentation about the campaign matches the campaign.** `CONTENT` signatures look for
+  distinctive strings, and those appear in vendor advisories, IOC feeds, incident tickets,
+  and this repository. A host storing any of that produces content matches. The tool's own
+  directory and signature files are excluded automatically, and snapshot stores
+  (`file-history`, `.history`) are pruned, but a saved advisory in `~/Documents` will still
+  match. Corroborate content-only hits before paging anyone; `--exclude` covers known
+  locations. A deeper fix would be to require corroboration before a content-only match is
+  reported as `CONFIRMED`.
+- **A second checkout of this repository is not auto-excluded.** Only the running install
+  is. Detecting "a SandwormCheck checkout" anywhere on disk would be trivially spoofable
+  into an arbitrary blind spot, so it is deliberately left to `--exclude`.
+- **`tests/fixtures/` is inherently IOC-shaped.** A cleaner design would generate fixtures
+  at test time so the repository never contains files matching its own shipped signatures.
+
 ## Repository hygiene
 
 - Branch protection is applied with `tools/setup-repo-protection.sh`. It currently

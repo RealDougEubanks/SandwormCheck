@@ -76,7 +76,15 @@ awk '
 		print name "@" ver
 	}
 	END { if (bad) { print "rejected " bad " malformed record(s)" > "/dev/stderr"; exit 1 } }
-' "$INPUT" | sort -u >"$WORK/pairs"
+' "$INPUT" >"$WORK/raw" || {
+	# Written to a file rather than piped into sort: a pipeline reports only the
+	# LAST command's status, so awk's non-zero exit was masked and the tool emitted
+	# a file while claiming success. Malformed records were dropped silently, which
+	# is exactly the fail-open the validation exists to prevent.
+	printf '%s: refusing to emit a signature file with malformed records\n' "$PROGNAME" >&2
+	exit 1
+}
+sort -u "$WORK/raw" >"$WORK/pairs"
 
 TOTAL=$(wc -l <"$WORK/pairs" | tr -d ' ')
 [ "$TOTAL" -gt 0 ] || {

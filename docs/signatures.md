@@ -209,7 +209,10 @@ mv /tmp/merged.txt signatures/compromised-packages.txt
 ./tests/run-tests.sh
 ```
 
-`merge-package-list.sh` accepts a Socket-style CSV or a plain `name@version` list, and
+`merge-package-list.sh` filters a Socket-style CSV to **npm rows only**, reporting how many
+non-npm rows it skipped and from which ecosystem. The feed gained golang entries on
+2026-08-05; a Go pseudo-version is not something `PKGVER` can match, so ingesting them would
+add records that can never fire. It accepts a plain `name@version` list too, and it
 **unions** rather than replaces. That is not politeness — as of 2026-08-04 both the Wiz
 CSV and Socket's CSV omit the entire `@keyv/*` scope, which only JFrog published, so
 overwriting from a single feed would silently delete 19 confirmed packages. The tool

@@ -86,6 +86,18 @@ what, and [docs/references.md](docs/references.md) for per-indicator provenance.
   `package-lock.json` (v1/v2/v3), `npm-shrinkwrap.json`, `yarn.lock` (v1 and berry),
   `pnpm-lock.yaml` (v5/v6/v9), `bun.lock`, and `bun.lockb`.
 
+### Ecosystem scope
+
+Dependency detection is **npm-only**: `package.json` plus the npm, yarn, pnpm, and bun
+lockfiles. On 2026-08-05 the campaign crossed into Go — including the same maintainer's
+`github.com/jaredwray/{keyv,cacheable,ecto}` — and those modules are **not** matched by
+version here.
+
+The artifact signatures are ecosystem-agnostic, so a Go-delivered infection that drops the
+same payload, persistence chain, or running process is still detected. It is the manifest
+check that is npm-specific. See [docs/references.md](docs/references.md) and
+[docs/ToDo.md](docs/ToDo.md).
+
 ### What it does not do
 
 It reads the filesystem. It cannot see what your registry saw, and it cannot tell you

@@ -1,0 +1,27 @@
+# Dependabot version updates.
+#
+# This repository has no application dependencies on purpose: the scanners are
+# POSIX sh and PowerShell with no package manifest, which is the whole point of a
+# tool that audits the npm supply chain. GitHub Actions is therefore the only
+# ecosystem with anything to update.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - github-actions
+    # Workflows pin actions to a commit SHA rather than a tag, because a tag is a
+    # mutable reference. Dependabot understands SHA pins and will propose the new
+    # SHA with the matching version in the PR body, so review stays meaningful.
+    groups:
+      actions:
+        patterns:
+          - "*"

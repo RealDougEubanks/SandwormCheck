@@ -1,0 +1,27 @@
+#!/bin/sh
+# SandwormCheck pre-push hook.
+#
+# Runs the full checks including the test suite, because a push is the last point
+# where a problem is still cheap to fix locally. Takes roughly a minute.
+#
+# Install with: ./tools/install-hooks.sh
+# Bypass with:  git push --no-verify
+
+set -u
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+
+[ -f "$ROOT/tools/checks.sh" ] || exit 0
+
+printf 'pre-push: running full checks including the test suite\n' >&2
+if sh "$ROOT/tools/checks.sh"; then
+	exit 0
+fi
+
+cat >&2 <<'MSG'
+
+pre-push: checks failed, push aborted.
+
+Bypass with: git push --no-verify
+MSG
+exit 1

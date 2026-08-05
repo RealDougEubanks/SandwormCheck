@@ -3,7 +3,7 @@
 What to do about a scan result. This is incident guidance, not a substitute for your own
 IR process.
 
-> BunWormCheck is read-only and will not clean anything up. Every step below is yours to
+> SandwormCheck is read-only and will not clean anything up. Every step below is yours to
 > perform deliberately.
 
 ---
@@ -126,7 +126,7 @@ This is a dependency problem, not an incident — but confirm rather than assume
 ```sh
 npm ls keyv cacheable cache-manager flat-cache file-entry-cache
 rm -rf node_modules package-lock.json && npm cache clean --force && npm install
-./bunwormcheck.sh --path . --verbose
+./sandwormcheck.sh --path . --verbose
 ```
 
 Check whether install scripts could have run:
@@ -155,7 +155,7 @@ Fix and re-run before recording the host as scanned.
 ## Verifying remediation
 
 ```sh
-sudo ./bunwormcheck.sh --verbose
+sudo ./sandwormcheck.sh --verbose
 echo "exit: $?"
 ```
 

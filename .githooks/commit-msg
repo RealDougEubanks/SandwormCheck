@@ -1,0 +1,41 @@
+#!/bin/sh
+# SandwormCheck commit-msg hook.
+#
+# Enforces only what actually helps when reading history later: a subject line
+# that is present, reasonably short, and not a placeholder. Body style is left
+# alone deliberately -- this is a nudge, not a linter.
+
+set -u
+
+MSGFILE=$1
+[ -f "$MSGFILE" ] || exit 0
+
+# First non-comment, non-blank line.
+SUBJECT=$(grep -v '^#' "$MSGFILE" | sed '/^[[:space:]]*$/d' | head -1)
+
+# Merge, revert, fixup, and squash messages are generated; leave them alone.
+case $SUBJECT in
+"Merge "* | "Revert "* | "fixup!"* | "squash!"* | "amend!"*) exit 0 ;;
+esac
+
+if [ -z "$SUBJECT" ]; then
+	printf 'commit-msg: empty commit message\n' >&2
+	exit 1
+fi
+
+# 72 is the width at which git log stops wrapping cleanly in most terminals.
+LEN=${#SUBJECT}
+if [ "$LEN" -gt 72 ]; then
+	printf 'commit-msg: subject is %s characters; keep it under 72\n' "$LEN" >&2
+	printf 'commit-msg:   %s\n' "$SUBJECT" >&2
+	exit 1
+fi
+
+case $SUBJECT in
+wip | WIP* | wip* | fix | Fix | update | Update | changes | Changes | asdf* | test | Test)
+	printf 'commit-msg: "%s" does not say what changed\n' "$SUBJECT" >&2
+	exit 1
+	;;
+esac
+
+exit 0

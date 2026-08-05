@@ -1,10 +1,14 @@
 # Scan output written into the repo directory. Narrow on purpose: a broad
 # *.json rule would swallow the test fixtures (settings.json, tasks.json,
 # package.json), which must be committed.
-/bunwormcheck-*.json
+/sandwormcheck-*.json
 /scan-*.json
 /*.out
 
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Research working notes. Durable provenance is recorded in docs/references.md
+# and the input list is committed as signatures/compromised-packages.txt.
+/.research/

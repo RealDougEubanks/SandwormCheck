@@ -12,8 +12,12 @@
         1   scanner error (an incomplete scan is NOT a clean scan)
         2   usage error
 
-    Reads the same signature/*.conf files as bunwormcheck.sh and implements the
+    Reads the same signature/*.conf files as sandwormcheck.sh and implements the
     same check types with the same semantics. See docs/spec.md.
+
+    Indicator content is not original research: it is assembled from public work
+    by Wiz, Socket, JFrog, CyberKendra, and Aikido. Credits and per-indicator
+    provenance are in docs/references.md.
 
     Requires PowerShell 5.1 (shipped with Windows 10/11) or PowerShell 7+.
     No external modules.
@@ -42,11 +46,11 @@
     Print only the verdict line.
 
 .EXAMPLE
-    .\BunWormCheck.ps1
+    .\SandwormCheck.ps1
     Scan with defaults and let $LASTEXITCODE carry the verdict.
 
 .EXAMPLE
-    .\BunWormCheck.ps1 -Json | Out-File scan.json
+    .\SandwormCheck.ps1 -Json | Out-File scan.json
     Machine-readable output for a log pipeline.
 #>
 
@@ -60,7 +64,7 @@ param(
 
     # Bounds are validated in Invoke-Main rather than with [ValidateRange], which
     # fails at parameter binding and would exit 1 instead of the documented
-    # usage code 2 — the sh and PowerShell scanners must agree on exit codes.
+    # usage code 2: the sh and PowerShell scanners must agree on exit codes.
     [int] $MaxDepth = 12,
 
     [long] $MaxFileSize = 8388608,
@@ -104,12 +108,12 @@ function Write-Diag {
 
 function Write-Warn {
     param([string] $Message)
-    [Console]::Error.WriteLine("bunwormcheck: warning: $Message")
+    [Console]::Error.WriteLine("sandwormcheck: warning: $Message")
 }
 
 function Stop-WithError {
     param([int] $Code, [string] $Message)
-    [Console]::Error.WriteLine("bunwormcheck: $Message")
+    [Console]::Error.WriteLine("sandwormcheck: $Message")
     exit $Code
 }
 
@@ -147,7 +151,7 @@ function Import-Signatures {
     param([string[]] $Files)
 
     $records = New-Object System.Collections.ArrayList
-    $validTypes = @('PATHEXISTS', 'PATHGLOB', 'FILENAME', 'SHA256', 'SHA1', 'PKGVER', 'CONTENT')
+    $validTypes = @('PATHEXISTS', 'PATHGLOB', 'FILENAME', 'SHA256', 'SHA1', 'PKGVER', 'CONTENT', 'PROCESS')
 
     foreach ($file in $Files) {
         try {
@@ -235,6 +239,11 @@ function Import-Signatures {
     if ($records.Count -eq 0) {
         Stop-WithError $EXIT_ERROR 'no valid signature records loaded'
     }
+    # A campaign split across several files (hand-maintained indicators in one,
+    # generated package versions in another) declares the same name in each.
+    $uniqueCampaigns = @($script:Campaigns | Select-Object -Unique)
+    $script:Campaigns = New-Object System.Collections.ArrayList
+    foreach ($c in $uniqueCampaigns) { [void] $script:Campaigns.Add($c) }
     Write-Diag "loaded $($records.Count) signature records"
     return $records
 }
@@ -532,6 +541,262 @@ function Invoke-PkgVerCheck {
 }
 
 # ---------------------------------------------------------------------------
+# Live implant processes
+#
+# Without this the scanner is blind to a running implant whose files have been
+# removed: the dead-man's switch polls GitHub every 60 seconds, so the process can
+# outlive its artifacts. Reporting that host as clean would be a false clean.
+#
+# Read-only: reads the process table and never signals or modifies anything.
+# ---------------------------------------------------------------------------
+
+# Tools whose normal job is to name a file they are inspecting, so an implant
+# filename in their arguments means nothing. Interpreters are deliberately NOT
+# listed: the real gh-token-monitor.sh is a shell script, so it appears as
+# "/bin/sh /path/gh-token-monitor.sh" and skipping shells would miss it.
+$script:ProcSkipTools = @(
+    'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'find', 'locate', 'mdfind',
+    'awk', 'sed', 'cat', 'less', 'more', 'head', 'tail', 'vi', 'vim', 'nvim',
+    'emacs', 'nano', 'code', 'subl', 'open', 'strings', 'xxd', 'od', 'file',
+    'ps', 'pgrep', 'wc', 'sort', 'uniq', 'diff', 'cmp', 'md5', 'shasum',
+    'sha256sum', 'findstr', 'select-string', 'notepad', 'notepad++'
+)
+
+function Get-ProcessTable {
+    # Returns objects with Pid, ParentPid, Exe, and Args.
+    $rows = New-Object System.Collections.ArrayList
+    $onWindows = $true
+    $v = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+    if ($v) { $onWindows = [bool] $v.Value }   # PowerShell 7 defines this
+    # Windows PowerShell 5.1 does not define $IsWindows, and only runs on Windows.
+
+    if ($onWindows) {
+        try {
+            foreach ($p in Get-CimInstance Win32_Process -ErrorAction Stop) {
+                $cmd = if ($p.CommandLine) { $p.CommandLine } else { $p.Name }
+                [void] $rows.Add([PSCustomObject]@{
+                    Pid = [int] $p.ProcessId
+                    ParentPid = [int] $p.ParentProcessId
+                    Exe = $p.Name
+                    Args = $cmd
+                })
+            }
+        } catch {
+            Write-Warn "could not read the process table; PROCESS checks were SKIPPED"
+            return $null
+        }
+    } else {
+        try {
+            # Invoked through a variable, and by absolute path where available:
+            # on Windows "ps" is an alias for Get-Process, so a bare call trips
+            # PSAvoidUsingCmdletAliases even though this branch is Unix-only.
+            $psBin = if (Test-Path '/bin/ps') { '/bin/ps' } else { 'ps' }
+            $out = & $psBin -Ao 'pid=,ppid=,args=' 2>$null
+            if (-not $out) { $out = & $psBin ax -o 'pid=,ppid=,args=' 2>$null }
+            if (-not $out) { throw 'ps produced no output' }
+            foreach ($line in $out) {
+                $t = $line.Trim() -split '\s+', 3
+                if ($t.Count -lt 3) { continue }
+                $exe = ($t[2] -split '\s+')[0]
+                [void] $rows.Add([PSCustomObject]@{
+                    Pid = [int] $t[0]
+                    ParentPid = [int] $t[1]
+                    Exe = $exe
+                    Args = $t[2]
+                })
+            }
+        } catch {
+            Write-Warn "could not read the process table; PROCESS checks were SKIPPED"
+            return $null
+        }
+    }
+    return $rows
+}
+
+function Invoke-ProcessCheck {
+    param([object[]] $Signatures)
+
+    $sigs = @($Signatures | Where-Object { $_.Type -eq 'PROCESS' })
+    if ($sigs.Count -eq 0) { return }
+
+    $table = Get-ProcessTable
+    if ($null -eq $table) { return }
+
+    $byPid = @{}
+    foreach ($r in $table) { $byPid[$r.Pid] = $r }
+
+    # Every ancestor of this scan: an operator's own investigation command
+    # frequently names the artifacts, and our argv mentions the signature path.
+    $mine = New-Object System.Collections.Generic.HashSet[int]
+    $cur = $PID
+    $guard = 0
+    while ($cur -and $cur -ne 0 -and $cur -ne 1 -and $guard -lt 40) {
+        [void] $mine.Add($cur)
+        if (-not $byPid.ContainsKey($cur)) { break }
+        $cur = $byPid[$cur].ParentPid
+        $guard++
+    }
+
+    foreach ($r in $table) {
+        if ($mine.Contains($r.Pid)) { continue }
+        $base = $r.Exe
+        $slash = [Math]::Max($base.LastIndexOf('/'), $base.LastIndexOf('\'))
+        if ($slash -ge 0) { $base = $base.Substring($slash + 1) }
+        $base = $base -replace '\.exe$', ''
+        if ($script:ProcSkipTools -contains $base.ToLowerInvariant()) { continue }
+
+        foreach ($sig in $sigs) {
+            if ($r.Args.IndexOf($sig.Pattern, [StringComparison]::Ordinal) -ge 0) {
+                # PID only, never the command line: command lines can carry
+                # credentials as arguments, and findings reach fleet console logs.
+                Add-Finding $sig.Severity $sig.Id "pid $($r.Pid)" 'process match' $sig.Description
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Lockfile pins
+#
+# Invoke-PkgVerCheck only sees installed packages. A project that pins a
+# compromised version in its lockfile but has never had `npm install` run on
+# this host still needs remediation, and will reintroduce the bad version on the
+# next install.
+# ---------------------------------------------------------------------------
+
+# bun.lockb is binary but not opaque: it embeds registry tarball URLs as
+# contiguous ASCII, so the resolved-URL patterns work against a Latin-1 decode.
+# A miss in a .lockb is less conclusive than a miss in a text lockfile.
+$script:LockfileNames = @(
+    'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock',
+    'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'
+)
+
+function Get-PkgVerLookup {
+    param([object[]] $Signatures)
+    $want = @{}
+    foreach ($sig in ($Signatures | Where-Object { $_.Type -eq 'PKGVER' })) {
+        if (-not $want.ContainsKey($sig.Pattern)) { $want[$sig.Pattern] = $sig }
+    }
+    return $want
+}
+
+function Invoke-LockfileCheck {
+    param([object[]] $Signatures, [string[]] $AllFiles)
+
+    # Extract every (name, version) pair the lockfile actually declares, then look
+    # each one up in the PKGVER table. One pass per lockfile, independent of how
+    # many signatures are loaded.
+    #
+    # The earlier approach built a literal pattern per signature per format
+    # (~16,000 for this campaign) and substring-searched each lockfile, which
+    # measured 30-60s on a single 175 KB pnpm lockfile. Parsing structurally is
+    # both faster and more precise: name and version are recovered as fields, so
+    # an unscoped signature cannot match a scoped package sharing its basename.
+    $want = Get-PkgVerLookup -Signatures $Signatures
+    if ($want.Count -eq 0) { return }
+
+    foreach ($file in $AllFiles) {
+        $leaf = [IO.Path]::GetFileName($file)
+        if ($script:LockfileNames -notcontains $leaf) { continue }
+
+        # A lockfile nested inside node_modules is a dependency's own dev
+        # lockfile; npm, yarn, and pnpm all ignore those when resolving, so a hit
+        # there would mislead as well as waste work. npm-shrinkwrap.json is the
+        # exception: npm does honor a shipped one.
+        if ($file -match '(?i)[\\/]node_modules[\\/]' -and $leaf -ne 'npm-shrinkwrap.json') { continue }
+
+        try {
+            $info = Get-Item -LiteralPath $file -Force -ErrorAction Stop
+            if ($info.Length -gt $MaxFileSize) {
+                Write-Diag "lockfile skipped (over -MaxFileSize): $file"
+                continue
+            }
+            # Latin-1 so bun.lockb's embedded ASCII survives; a UTF-8 decode
+            # mangles the surrounding binary and can drop the URLs.
+            $text = [IO.File]::ReadAllText($file, [Text.Encoding]::GetEncoding(28591))
+        } catch {
+            Write-Diag "lockfile skipped for ${file}: $($_.Exception.Message)"
+            continue
+        }
+
+        $seen = New-Object System.Collections.Generic.HashSet[string]
+
+        $report = {
+            param($nv)
+            if (-not $want.ContainsKey($nv)) { return }
+            if (-not $seen.Add($nv)) { return }
+            $sig = $want[$nv]
+            Add-Finding $sig.Severity $sig.Id $file "pinned $nv in $leaf" $sig.Description
+        }
+
+        # "name@version" -> split at the LAST @ so scoped names survive.
+        $atForm = {
+            param($t)
+            $p = $t.LastIndexOf('@')
+            if ($p -gt 0) { & $report ($t.Substring(0, $p) + '@' + $t.Substring($p + 1)) }
+        }
+        # "name/version" (pnpm 5.x keys) -> split at the LAST slash.
+        $slashForm = {
+            param($t)
+            $p = $t.LastIndexOf('/')
+            if ($p -gt 0) { & $report ($t.Substring(0, $p) + '@' + $t.Substring($p + 1)) }
+        }
+        $token = {
+            param($t)
+            if ([string]::IsNullOrEmpty($t)) { return }
+            if ($t.StartsWith('/')) { $t = $t.Substring(1) }
+            if ($t.EndsWith(':')) { $t = $t.Substring(0, $t.Length - 1) }
+            if ($t -eq '') { return }
+            $t = $t.Replace('@npm:', '@')
+            # Both forms are tried; each self-guards. A scoped name starts with
+            # "@", so requiring the @ past index 0 would wrongly reject
+            # "@cacheable/memory@2.2.1".
+            & $atForm $t
+            & $slashForm $t
+        }
+
+        foreach ($rawLine in ($text -split "`n")) {
+            $line = $rawLine.TrimEnd("`r")
+
+            # 1. Resolved registry tarball URL: .../<name>/-/<base>-<ver>.tgz
+            #    Covers npm v1/v2/v3, npm-shrinkwrap, yarn v1, and bun.lockb.
+            $i = $line.IndexOf('/-/')
+            if ($i -gt 3) {
+                $rest = $line.Substring($i + 3)
+                $j = $rest.IndexOf('.tgz')
+                if ($j -gt 1) {
+                    $basever = $rest.Substring(0, $j)
+                    $pre = $line.Substring(0, $i)
+                    $k = $pre.LastIndexOf('/')
+                    if ($k -ge 0) {
+                        $last = $pre.Substring($k + 1)
+                        $pre2 = $pre.Substring(0, $k)
+                        $k2 = $pre2.LastIndexOf('/')
+                        $prev = if ($k2 -ge 0) { $pre2.Substring($k2 + 1) } else { $pre2 }
+                        # A scope only counts if the preceding segment starts with @.
+                        $nm = if ($prev.StartsWith('@')) { "$prev/$last" } else { $last }
+                        if ($basever.StartsWith("$last-")) {
+                            & $report ($nm + '@' + $basever.Substring($last.Length + 1))
+                        }
+                    }
+                }
+            }
+
+            # 2. Every quoted token: yarn berry resolutions, bun.lock entries, and
+            #    quoted pnpm mapping keys.
+            $parts = $line.Split('"')
+            for ($m = 1; $m -lt $parts.Count; $m += 2) { & $token $parts[$m] }
+            $parts = $line.Split("'")
+            for ($m = 1; $m -lt $parts.Count; $m += 2) { & $token $parts[$m] }
+
+            # 3. Bare pnpm mapping key: indented, ends in a colon.
+            if ($line -match '^[ \t]+[^ \t"'']+:[ \t]*$') { & $token $line.Trim() }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Candidate selection (spec section 6)
 # ---------------------------------------------------------------------------
 function Select-Candidates {
@@ -598,13 +863,15 @@ function Get-ExitCode {
 function Write-TextReport {
     param([string[]] $Roots)
 
-    $useColor = -not $NoColor -and -not $env:NO_COLOR
+    # Suppress colour when stdout is not a console, matching the sh scanner's
+    # [ -t 1 ] guard, so redirected or piped output stays plain.
+    $useColor = -not $NoColor -and -not $env:NO_COLOR -and -not [Console]::IsOutputRedirected
     $verdict = Get-Verdict
     $confirmed = @($script:Findings | Where-Object { $_.Severity -eq 'CONFIRMED' }).Count
     $suspect = @($script:Findings | Where-Object { $_.Severity -eq 'SUSPECT' }).Count
 
     if (-not $Quiet) {
-        Write-Output "BunWormCheck $($script:ToolVersion)"
+        Write-Output "SandwormCheck $($script:ToolVersion)"
         Write-Output ("  host      : " + (Get-HostIdentifier))
         Write-Output ("  scanned   : {0} roots, {1} files, {2}s" -f `
                 $Roots.Count, $script:FilesWalked, [int]$script:Stopwatch.Elapsed.TotalSeconds)
@@ -671,7 +938,7 @@ function Write-JsonReport {
     param([string[]] $Roots)
 
     $report = [ordered]@{
-        schema           = 'bunwormcheck/v1'
+        schema           = 'sandwormcheck/v1'
         tool_version     = $script:ToolVersion
         host             = Get-HostIdentifier
         scanned_at       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -709,7 +976,7 @@ function Write-JsonReport {
 # ---------------------------------------------------------------------------
 function Invoke-Main {
     if ($Version) {
-        Write-Output "bunwormcheck $($script:ToolVersion)"
+        Write-Output "sandwormcheck $($script:ToolVersion)"
         exit $EXIT_CLEAN
     }
 
@@ -723,8 +990,8 @@ function Invoke-Main {
         Stop-WithError $EXIT_USAGE "-TimeoutSeconds must be between 10 and 86400, got: $TimeoutSeconds"
     }
 
-    $sigFiles = Resolve-SignatureFiles -Requested $SignaturePath
-    $signatures = Import-Signatures -Files $sigFiles
+    $sigFiles = @(Resolve-SignatureFiles -Requested $SignaturePath)
+    $signatures = @(Import-Signatures -Files $sigFiles)
 
     if ($Path) {
         foreach ($p in $Path) {
@@ -734,7 +1001,7 @@ function Invoke-Main {
         }
         $roots = @($Path | ForEach-Object { (Get-Item -LiteralPath $_).FullName } | Select-Object -Unique)
     } else {
-        $roots = Get-DefaultScanPaths
+        $roots = @(Get-DefaultScanPaths)
     }
     if ($roots.Count -eq 0) {
         Stop-WithError $EXIT_ERROR 'no scannable roots found; pass -Path explicitly'
@@ -765,13 +1032,18 @@ function Invoke-Main {
     $allFilesArr = @($allFiles)
     $script:FilesWalked = $allFilesArr.Count
 
-    $candidates = Select-Candidates -AllFiles $allFilesArr -Signatures $signatures
+    # Wrap in @(): a PowerShell function returning an empty array yields $null,
+    # and under Set-StrictMode reading .Count on $null throws. A scan whose
+    # candidate set is legitimately empty must not crash.
+    $candidates = @(Select-Candidates -AllFiles $allFilesArr -Signatures $signatures)
     Write-Diag "$($script:FilesWalked) files walked, $($candidates.Count) candidates"
 
     Invoke-PathExistsCheck -Signatures $signatures -HomeDirs $homeDirs
     Invoke-FilenameCheck -Signatures $signatures -Candidates $candidates
     Invoke-PathGlobCheck -Signatures $signatures -Candidates $candidates
+    Invoke-ProcessCheck -Signatures $signatures
     Invoke-PkgVerCheck -Signatures $signatures -AllFiles $allFilesArr
+    Invoke-LockfileCheck -Signatures $signatures -AllFiles $allFilesArr
     Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
     Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
     Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'
@@ -792,7 +1064,7 @@ try {
 } catch {
     # No unhandled exception may escape: an uncaught throw would surface a
     # PowerShell exit code that the fleet console would misread.
-    [Console]::Error.WriteLine("bunwormcheck: unhandled error: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("sandwormcheck: unhandled error: $($_.Exception.Message)")
     [Console]::Error.WriteLine($_.ScriptStackTrace)
     exit $EXIT_ERROR
 }

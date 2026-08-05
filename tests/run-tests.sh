@@ -495,6 +495,66 @@ test_process_false_positives() {
 	kill "$_imp" 2>/dev/null || :
 }
 
+test_multi_user_coverage() {
+	section "per-user checks cover every account"
+
+	# This campaign's persistence is per-user (~/.config/gh-token-monitor,
+	# ~/Library/LaunchAgents/...), so a home directory the scanner does not know
+	# about is a compromise it cannot see on that account. Globbing /Users/* and
+	# /home/* missed macOS's root account, whose home is /var/root.
+	_fns=$(sed -n '/^enumerate_homes()/,/^}/p;/^walk_homes()/,/^}/p' "$SCANNER")
+	if [ -z "$_fns" ]; then
+		printf '  skip (could not extract the home-enumeration functions)\n'
+		return 0
+	fi
+
+	_homes=$(WORKDIR="$TMP" "$CURRENT_SHELL" -c "$_fns
+		enumerate_homes" 2>/dev/null)
+	_walk=$(WORKDIR="$TMP" "$CURRENT_SHELL" -c "$_fns
+		walk_homes" 2>/dev/null)
+
+	_nh=$(printf '%s\n' "$_homes" | awk 'NF' | wc -l | tr -d ' ')
+	if [ "${_nh:-0}" -ge 1 ]; then
+		ok "enumerate_homes found $_nh home director(ies)"
+	else
+		no "enumerate_homes found at least one home" "found none"
+	fi
+
+	# Every walk root must also be in the per-user set; the reverse need not hold.
+	_bad=0
+	printf '%s\n' "$_walk" | while IFS= read -r _w; do
+		[ -n "$_w" ] || continue
+		printf '%s\n' "$_homes" | grep -qxF "$_w" || printf 'missing:%s\n' "$_w"
+	done >"$TMP/walkmissing"
+	if [ -s "$TMP/walkmissing" ]; then
+		no "every walk root is also covered by per-user checks" "$(head -1 "$TMP/walkmissing")"
+	else
+		ok "every walk root is also covered by per-user checks"
+	fi
+
+	# root's home must be present on whichever platform this is.
+	if [ -d /var/root ] || [ -d /root ]; then
+		if printf '%s\n' "$_homes" | grep -qxE '/var/root|/root'; then
+			ok "root's home directory is covered"
+		else
+			no "root's home directory is covered" "neither /root nor /var/root enumerated"
+		fi
+	else
+		printf '  skip (no root home on this host)\n'
+	fi
+
+	# The current user's home must be covered, whatever its location.
+	if [ -n "${HOME:-}" ]; then
+		if printf '%s\n' "$_homes" | grep -qxF "$HOME"; then
+			ok "the invoking user's home is covered"
+		else
+			no "the invoking user's home is covered" "$HOME not enumerated"
+		fi
+	fi
+
+	[ "$_bad" -eq 0 ] || no "multi-user enumeration" "see above"
+}
+
 test_signature_validation() {
 	section "signature validation [$CURRENT_SHELL]"
 
@@ -985,6 +1045,7 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_process_check
 	test_symlinked_root
 	test_process_false_positives
+	test_multi_user_coverage
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

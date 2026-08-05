@@ -34,8 +34,13 @@ cd SandwormCheck
 "exit code: $LASTEXITCODE"
 ```
 
-With no arguments it scans user home directories and common deployment paths. Run it as
-root or Administrator to cover every user profile on the machine.
+With no arguments it scans every user's home directory plus common deployment paths. Run it
+as **root** (or Administrator) so it can read all of them — home directories are where this
+campaign's per-user persistence lives.
+
+Home directories come from the OS user database (`dscl` on macOS, `getent`/`/etc/passwd`
+elsewhere), not from globbing `/Users/*`, so accounts with a home outside the usual
+locations are covered — including macOS's root account, whose home is `/var/root`.
 
 ## Exit codes
 
@@ -208,6 +213,22 @@ if ($null -eq $LASTEXITCODE) {
 }
 exit $LASTEXITCODE
 ```
+
+### If git is not installed
+
+Both `tools/run-latest.*` fall back to downloading a zip of the ref from
+`codeload.github.com`, expanding it, and running from that. A git host that fails to
+update also falls back rather than scanning with a stale copy. The archive is validated
+(it must actually contain the scanner) before the previous copy is replaced, so a failed
+update leaves a working install in place.
+
+An archive carries no history and no signature — the same trust level as a shallow clone
+over HTTPS, so nothing is given up. On Unix the fallback needs `curl` or `wget` plus
+`unzip`; on Windows it uses `Invoke-WebRequest` and `Expand-Archive`, with TLS 1.2 forced
+because Windows PowerShell 5.1 does not default to it.
+
+The inline snippets above use git only. Use `tools/run-latest.sh` /
+`tools/run-latest.ps1` if any of your fleet lacks git.
 
 ### Two things to get right
 

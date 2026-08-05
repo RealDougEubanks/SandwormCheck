@@ -504,3 +504,34 @@ needing a `--no-self-exclude` escape hatch that production would never use, and 
 run hermetic.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** Home directories are enumerated from the OS user database, and per-user
+`PATHEXISTS` checks run against *every* account while only conventionally-located homes are
+walked.
+**Why:** Globbing `/Users/*` and `/home/*` missed macOS's root account, whose home is
+`/var/root` rather than `/root`, and any directory-service or network account with a home
+elsewhere. Since this campaign's persistence is per-user, a missed home is a missed
+compromise on that account — and the scanner is run as root precisely to cover them all.
+Service-account homes are excluded from the *walk* because there are hundreds and some are
+large, which would push a fleet scan past any sane timeout; they remain covered by the
+cheap path-existence checks. Walk roots are chosen by location, not by a UID threshold: the
+UID heuristic looked more principled but silently dropped accounts such as
+`/Users/HDHomeRun` that the previous globbing had always covered.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The deployment runners fall back to a GitHub zip archive when git is
+absent, and also when a git update fails.
+**Why:** A Windows host in the fleet reported "git not found", and a scanner that cannot
+install is a scanner that detects nothing. An archive carries no history and no signature,
+but that is the same trust level as a shallow clone over HTTPS, so the fallback gives up
+nothing that the primary path provided. The archive is validated — it must contain the
+scanner — before the existing copy is replaced, so a failed or hijacked download leaves a
+working install in place rather than destroying it. TLS 1.2 is forced explicitly because
+Windows PowerShell 5.1 does not negotiate it by default.
+**Recorded by:** Claude
+**Date:** 2026-08-05

@@ -47,8 +47,14 @@ fi
 sh "$DEST/sandwormcheck.sh" --timeout 600
 ```
 
-If your fleet has no outbound git access, drop the repo into your golden image or push it
-with a JumpCloud file distribution policy and reduce the command to the final line.
+If a host has no git, use `tools/run-latest.sh` / `tools/run-latest.ps1` instead of the
+inline snippets: they fall back to downloading a zip of the ref. If your fleet has no
+outbound access at all, drop the repo into your golden image or push it with a JumpCloud
+file distribution policy and reduce the command to the final line.
+
+Run as root (Mac/Linux) or SYSTEM (Windows). Home directories are enumerated from the OS
+user database, so every account is covered — including macOS's root account at `/var/root`
+— but only if the scan can read them.
 
 The same snippets, hardened and with a stale-copy fallback, ship as
 `tools/run-latest.sh` and `tools/run-latest.ps1`. The README's

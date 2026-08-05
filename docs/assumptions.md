@@ -615,3 +615,28 @@ repository *description*; on disk it appears inside the payload bundle. A fixtur
 passes because a check is over-broad is not evidence the check works.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** The pasteable snippets in the README are the single copy of the update
+logic, and they are self-contained rather than deferring to `tools/run-latest.*`.
+**Why:** A Windows host reported `git not found` even after the runners gained a zip
+fallback, because the fallback lived *inside the repository* and the README and
+`docs/jumpcloud.md` each carried their own git-only snippet. Telling operators to "use
+tools/run-latest.ps1 instead" was circular advice: fetching that tool requires the repo it
+is meant to fetch. Three copies of the same logic drifted, and the one people actually
+pasted was the one without the fix. `docs/jumpcloud.md` now points at the README rather
+than duplicating it, and both snippets use git when present and an archive when not.
+**Recorded by:** Claude
+**Date:** 2026-08-05
+
+---
+
+**Assumption:** The bootstrap snippet uses `[IO.Path]::GetTempPath()` rather than
+`$env:TEMP`.
+**Why:** `$env:TEMP` is not guaranteed to be set for the service account a fleet agent runs
+under, and JumpCloud's Windows commands execute as SYSTEM. Found when the snippet failed on
+a host where it was unset: `Join-Path $env:TEMP ...` yielded null and the download stage
+collapsed with a misleading "could not obtain SandwormCheck".
+**Recorded by:** Claude
+**Date:** 2026-08-05

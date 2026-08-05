@@ -109,6 +109,15 @@ just not by its manifest. Stated in the README rather than left implicit.
 - **`tests/fixtures/` is inherently IOC-shaped.** A cleaner design would generate fixtures
   at test time so the repository never contains files matching its own shipped signatures.
 
+## Documentation duplication
+
+The update logic exists in the README snippets and in `tools/run-latest.*`. That is one
+duplication more than ideal, and it has already caused a real failure: a third copy in
+`docs/jumpcloud.md` drifted, kept the git-only form, and hosts without git failed while the
+fix existed elsewhere. `docs/jumpcloud.md` now references the README instead of duplicating
+it. A test that extracts the README snippets and executes them would close the remaining gap
+between the snippets and the tools; today that check is manual.
+
 ## Repository hygiene
 
 - Branch protection is applied with `tools/setup-repo-protection.sh`. It currently

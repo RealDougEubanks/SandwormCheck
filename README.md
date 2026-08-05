@@ -255,7 +255,7 @@ CI" mean the same thing. Checks whose tool is missing are skipped with a warning
 than blocking a commit; CI installs everything and is the real gate. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-153 assertions covering every check type (true positive and true negative), all five exit
+164 assertions covering every check type (true positive and true negative), all five exit
 codes, every lockfile format, signature and argument validation, secret non-disclosure,
 read-only behavior, and parity between the shell and PowerShell implementations. Several
 fixtures are regressions from false positives found by scanning a real machine — a

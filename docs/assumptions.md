@@ -711,3 +711,23 @@ the same reason: a full scan of such a machine measured 960s and the walk ceilin
 about 20% overshoot.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** Every per-file loop in the PowerShell port checks the time budget, and the
+port's residual overshoot is documented rather than engineered away.
+**Why:** A fleet host given `-TimeoutSeconds 1500` under an 1800s agent limit was killed at
+exactly 1800s with exit 124 and produced no verdict at all. The port checked its budget in two
+places, both inside the directory walk, against five in the shell engine: the walk stopped on
+time and the content and hash sweeps then ran unbounded. The parity tests never caught it
+because they compare findings and exit codes on fixtures that finish instantly, and the
+defaults check compares values rather than enforcement.
+
+All ten per-file loops are now bounded, including the exclusion filter and candidate
+selection, which were the dominant cost after the walk. Overshoot remains larger than the
+shell engine's 15-22% because PowerShell's per-file loops are slower than `awk` and `grep`
+pipelines, so the same periodic checks land further apart in wall-clock terms. Rather than
+keep chasing it, the guidance is to budget `-TimeoutSeconds` at about half an agent limit on
+Windows, or use `-Fast`, which skips the expensive stages entirely.
+**Recorded by:** Claude
+**Date:** 2026-08-05

@@ -76,7 +76,7 @@ If the agent kills the process you get **no verdict at all**. If the scanner sto
 itself you get exit `1`, meaning "no answer yet", which is triageable:
 
 ```
-agent limit 600s, scanner --timeout 1800  ->  killed at 600s   ->  124, nothing
+agent limit 600s, scanner --timeout 7200  ->  killed at 600s   ->  124, nothing
 agent limit 600s, scanner --timeout 540   ->  stops itself     ->  1, plus findings so far
 ```
 
@@ -193,7 +193,7 @@ files scanned, not with the number of signatures — see [docs/spec.md](docs/spe
                           directory and signature files are always excluded.
       --max-depth N       Directory depth limit (1-64, default 12)
       --max-file-size N   Skip larger files for hash/content checks (default 8 MiB)
-      --timeout N         Wall-clock limit for the whole scan (10-86400, default 3600)
+      --timeout N         Wall-clock limit for the whole scan (10-86400, default 7200)
       --fast              Skip the content and hash sweeps; keeps every cheap
                           high-signal check
       --json              Emit one JSON object instead of text
@@ -275,7 +275,7 @@ fi
 }
 [ "$updated" -eq 1 ] || echo "WARNING: update failed; scanning with the existing copy" >&2
 
-sh "$DEST/sandwormcheck.sh" --timeout 1800
+sh "$DEST/sandwormcheck.sh" --timeout 7200
 ```
 
 ### Windows
@@ -346,7 +346,7 @@ if (-not $updated) {
 # Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
 # would report this host as clean when it was never scanned.
 $global:LASTEXITCODE = $null
-& $scanner -TimeoutSeconds 1800
+& $scanner -TimeoutSeconds 7200
 if ($null -eq $LASTEXITCODE) {
     [Console]::Error.WriteLine('scanner produced no exit code'); exit 1
 }

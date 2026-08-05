@@ -77,7 +77,7 @@ param(
 
     [long] $MaxFileSize = 8388608,
 
-    [int] $TimeoutSeconds = 3600,
+    [int] $TimeoutSeconds = 7200,
 
     # Skips the content and hash sweeps: the two stages whose cost is proportional
     # to BYTES rather than to file count. Deliberate coverage choice, not a
@@ -114,6 +114,26 @@ $script:FilesWalked = 0
 # ---------------------------------------------------------------------------
 # Diagnostics. Non-report output goes to stderr/verbose so stdout stays parseable.
 # ---------------------------------------------------------------------------
+function Set-Truncated {
+    $script:Truncated = $true
+}
+
+function Test-BudgetLeft {
+    # True while time budget remains; marks the scan truncated when it is gone.
+    #
+    # The port previously checked the budget only inside the directory walk, so the
+    # content and hash sweeps ran unbounded. A fleet host given -TimeoutSeconds 1500
+    # was killed by its agent at 1800s with exit 124 and produced no verdict at all:
+    # the walk stopped on time and the sweeps then ran past the agent's limit. The sh
+    # engine had five budget checks to this port's two, and the parity tests never
+    # caught it because they run on fixtures that finish instantly.
+    if ($script:Stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+        Set-Truncated
+        return $false
+    }
+    return $true
+}
+
 function Write-Diag {
     param([string] $Message)
     Write-Verbose $Message
@@ -436,7 +456,9 @@ function Invoke-FilenameCheck {
     }
     if ($byName.Count -eq 0) { return }
 
+    $fnN = 0
     foreach ($file in $Candidates) {
+        if ((++$fnN % 50000) -eq 0 -and -not (Test-BudgetLeft)) { break }
         $leaf = [IO.Path]::GetFileName($file).ToLowerInvariant()
         if ($byName.ContainsKey($leaf)) {
             foreach ($sig in $byName[$leaf]) {
@@ -513,7 +535,9 @@ function Invoke-PathGlobCheck {
         }
     }
 
+    $pgN = 0
     foreach ($file in $Candidates) {
+        if ((++$pgN % 50000) -eq 0 -and -not (Test-BudgetLeft)) { break }
         # Signature globs use forward slashes; compare on a normalized copy so one
         # pattern works on both platforms.
         $norm = $file -replace '\\', '/'
@@ -537,7 +561,13 @@ function Invoke-HashCheck {
         [void] $lookup[$sig.Pattern].Add($sig)
     }
 
+    $hashed = 0
     foreach ($file in $Candidates) {
+        # Hashing reads every byte, so this stage must be bounded too.
+        if ((++$hashed % 1000) -eq 0 -and -not (Test-BudgetLeft)) {
+            Write-Warn "$Algorithm hashing stopped after $hashed of $($Candidates.Count) files (-TimeoutSeconds $TimeoutSeconds)"
+            break
+        }
         try {
             $info = Get-Item -LiteralPath $file -Force -ErrorAction Stop
             if ($info.Length -gt $MaxFileSize) { continue }
@@ -635,7 +665,9 @@ function Invoke-PkgVerCheck {
         [void] $wanted[$key].Add($sig)
     }
 
+    $pvN = 0
     foreach ($file in $AllFiles) {
+        if ((++$pvN % 20000) -eq 0 -and -not (Test-BudgetLeft)) { break }
         if ([IO.Path]::GetFileName($file) -ne 'package.json') { continue }
         try {
             $info = Get-Item -LiteralPath $file -Force -ErrorAction Stop
@@ -886,7 +918,9 @@ function Invoke-LockfileCheck {
     $want = Get-PkgVerLookup -Signatures $Signatures
     if ($want.Count -eq 0) { return }
 
+    $lfseen = 0
     foreach ($file in $AllFiles) {
+        if ((++$lfseen % 20000) -eq 0 -and -not (Test-BudgetLeft)) { break }
         $leaf = [IO.Path]::GetFileName($file)
         if ($script:LockfileNames -notcontains $leaf) { continue }
 
@@ -1005,10 +1039,18 @@ function Select-Candidates {
     }
 
     $out = New-Object System.Collections.ArrayList
+    $rx = [regex]::new('[\\/](node_modules|\.claude|\.vscode)[\\/]', 'IgnoreCase')
+    $n = 0
     foreach ($file in $AllFiles) {
+        if ((++$n % 20000) -eq 0 -and -not (Test-BudgetLeft)) {
+            Write-Warn "candidate selection stopped after $n files (-TimeoutSeconds $TimeoutSeconds)"
+            break
+        }
         $leaf = [IO.Path]::GetFileName($file)
         if ($names.Contains($leaf)) { [void] $out.Add($file); continue }
-        if ($file -match '(?i)[\\/](node_modules|\.claude|\.vscode)[\\/]') { [void] $out.Add($file) }
+        # A compiled regex reused across files, rather than -match recompiling per
+        # file, which is measurable over hundreds of thousands of paths.
+        if ($rx.IsMatch($file)) { [void] $out.Add($file) }
     }
     return @($out | Select-Object -Unique)
 }
@@ -1102,7 +1144,8 @@ function Write-TextReport {
         }
 
         if ($script:Truncated) {
-            Write-Output "SCAN TRUNCATED: the ${TimeoutSeconds}s timeout expired before all roots were walked."
+            Write-Output "SCAN TRUNCATED: the ${TimeoutSeconds}s -TimeoutSeconds was exhausted before the scan finished."
+            Write-Output 'Some checks did not run. See the warnings on stderr for which.'
             Write-Output 'This result is NOT a clean bill of health. Re-run with a longer -TimeoutSeconds.'
             Write-Output ''
         }
@@ -1229,7 +1272,30 @@ function Invoke-Main {
     }
     $exclusions = @(Build-Exclusions)
     if ($exclusions.Count -gt 0) {
-        $allFilesArr = @($allFiles | Where-Object { -not (Test-Excluded $_ $exclusions) })
+        # Inlined rather than piping through Where-Object with a function call per
+        # path. A PowerShell function invocation per file over hundreds of thousands
+        # of paths dominated the run: with a 20s budget the scan took 97s, almost all
+        # of it here, after the walk had already stopped on time.
+        $kept = New-Object System.Collections.ArrayList
+        $exArr = @($exclusions)
+        $n = 0
+        foreach ($f in $allFiles) {
+            if ((++$n % 20000) -eq 0 -and -not (Test-BudgetLeft)) {
+                Write-Warn "exclusion filtering stopped after $n files (-TimeoutSeconds $TimeoutSeconds)"
+                break
+            }
+            $nf = $f.Replace('\', '/')
+            $skip = $false
+            foreach ($p in $exArr) {
+                if ($nf.Length -ge $p.Length -and
+                    $nf.StartsWith($p, [StringComparison]::OrdinalIgnoreCase) -and
+                    ($nf.Length -eq $p.Length -or $nf[$p.Length] -eq '/')) {
+                    $skip = $true; break
+                }
+            }
+            if (-not $skip) { [void] $kept.Add($f) }
+        }
+        $allFilesArr = @($kept)
     } else {
         $allFilesArr = @($allFiles)
     }
@@ -1238,7 +1304,13 @@ function Invoke-Main {
     # Wrap in @(): a PowerShell function returning an empty array yields $null,
     # and under Set-StrictMode reading .Count on $null throws. A scan whose
     # candidate set is legitimately empty must not crash.
-    $candidates = @(Select-Candidates -AllFiles $allFilesArr -Signatures $signatures)
+    if ($Fast) {
+        # The sweeps that consume this list do not run, so building it is pure cost.
+        $candidates = @()
+        Write-Diag '-Fast: candidate list not built'
+    } else {
+        $candidates = @(Select-Candidates -AllFiles $allFilesArr -Signatures $signatures)
+    }
     Write-Diag "$($script:FilesWalked) files walked, $($candidates.Count) candidates"
 
     Invoke-PathExistsCheck -Signatures $signatures -HomeDirs $homeDirs
@@ -1250,9 +1322,17 @@ function Invoke-Main {
     if ($Fast) {
         Write-Diag '-Fast: skipping content and hash sweeps by request'
     } else {
-        Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
-        Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
-        Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'
+        if (Test-BudgetLeft) {
+            Invoke-ContentCheck -Signatures $signatures -Candidates $candidates
+        } else {
+            Write-Warn "skipped content markers: -TimeoutSeconds $TimeoutSeconds exhausted"
+        }
+        if (Test-BudgetLeft) {
+            Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA256'
+            Invoke-HashCheck -Signatures $signatures -Candidates $candidates -Algorithm 'SHA1'
+        } else {
+            Write-Warn "skipped hash checks: -TimeoutSeconds $TimeoutSeconds exhausted"
+        }
     }
 
     # De-duplicate: the same artifact can trip several signatures via different

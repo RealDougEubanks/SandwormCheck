@@ -41,7 +41,7 @@ without any preparation.
 README's shell snippet, and set the timeout below JumpCloud's own command timeout:
 
 ```sh
-sh "$DEST/sandwormcheck.sh" --timeout 3000
+sh "$DEST/sandwormcheck.sh" --timeout 7200
 ```
 
 Root matters. Home directories come from the OS user database, so every account is
@@ -152,7 +152,7 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 **cron**
 
 ```cron
-17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 3000 || logger -t sandwormcheck -p auth.warning "scan returned $?"
+17 4 * * * /bin/sh /opt/sandwormcheck/sandwormcheck.sh --quiet --timeout 7200 || logger -t sandwormcheck -p auth.warning "scan returned $?"
 ```
 
 ## Operational notes
@@ -160,7 +160,20 @@ awk -F'\t' '$2 == 1 || $2 == 2 {print $1}' results.tsv
 - **Run as root / SYSTEM.** Unprivileged runs only cover what the invoking user can read.
   The scanner reports how many paths it had to skip, so an under-privileged run is
   visible rather than silently narrow — but you still want full coverage.
-- **A 124 means the agent killed the scan.** SandwormCheck only ever exits 0, 1, 2, 10, or
+- **Set the agent limit above the scanner budget plus its overshoot.** The default budget
+is 7200s. Overshoot is roughly 20% on macOS and Linux and up to about 65% on Windows, so a
+full scan that actually uses its whole budget can run:
+
+| Platform | Budget | Worst case | Agent limit needed |
+|---|---|---|---|
+| macOS / Linux | 7200s | ~8600s | 9000s+ |
+| Windows | 7200s | ~11900s | 12000s+ |
+
+Most hosts finish long before the budget; these are ceilings, not expectations. If your agent
+cannot be set that high, either lower `--timeout` to about half the agent limit or use
+`--fast`, which avoids the stages that consume the budget.
+
+**A 124 means the agent killed the scan.** SandwormCheck only ever exits 0, 1, 2, 10, or
 20. Anything else came from outside it. `124` is the conventional "timed out" status, so it
 means the agent's command timeout fired before the scanner finished — and you get **no
 verdict**, which is strictly worse than a truncated one.

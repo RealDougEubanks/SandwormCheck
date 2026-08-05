@@ -92,11 +92,16 @@ the payload is ~728 KB. Raise it only if you have a reason to.
 
 ### `--timeout N` / `-TimeoutSeconds N`
 
-Wall-clock ceiling for the whole scan, 10–86400, default 3600.
+Wall-clock ceiling for the whole scan, 10–86400, default 7200.
 
 The walk stage is bounded by killing `find` when the budget expires, so the ceiling holds
-even inside a slow subtree. Measured overshoot is about 15–22%, because the remaining stages
-check the budget between work chunks rather than continuously. **Size this below any fleet
+even inside a slow subtree. Measured overshoot on the shell scanner is about 15–22%, because
+the remaining stages check the budget between work chunks rather than continuously.
+
+**The PowerShell port overshoots more — roughly 40–100% on a large tree.** Its per-file loops
+are slower than the shell engine's `awk`/`grep` pipelines, so the same periodic budget checks
+land further apart in wall-clock terms. Size `-TimeoutSeconds` to roughly **half** any agent
+command timeout on Windows, or use `-Fast`, which avoids the expensive stages altogether. **Size this below any fleet
 agent's own command timeout**, with headroom for that overshoot: if the agent kills the
 process you get no verdict, whereas a self-truncated scan reports exit `1`. On expiry the scanner reports what it found
 and marks the run truncated. **A truncated scan that found nothing exits `1`, not `0`** —
@@ -190,7 +195,7 @@ It reports a normal verdict (`CLEAN (fast)`, `SUSPECT`, `CONFIRMED`) rather than
 
 ```sh
 sudo ./sandwormcheck.sh --fast          # daily sweep
-sudo ./sandwormcheck.sh --timeout 3000  # weekly, full coverage
+sudo ./sandwormcheck.sh --timeout 7200  # weekly, full coverage
 ```
 
 ### `-q`, `--quiet` / `-Quiet`

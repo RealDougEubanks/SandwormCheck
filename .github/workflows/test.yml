@@ -122,7 +122,12 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+          exit 0   # see note below on $LASTEXITCODE
 
+      # GitHub's `shell: pwsh` fails a step if $LASTEXITCODE is non-zero when the
+      # script ends. Every step here runs a scanner that exits non-zero on purpose,
+      # so each needs an explicit `exit 0` after its assertions pass. Otherwise the
+      # step's result depends on whatever the last scanner call returned.
       - name: Malformed signatures fail closed
         shell: pwsh
         run: |
@@ -130,6 +135,7 @@ jobs:
           & ./SandwormCheck.ps1 -Path tests/fixtures/clean -SignaturePath bad.conf
           if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: expected 1, got $LASTEXITCODE"; exit 1 }
           Write-Host 'ok   malformed signature -> 1'
+          exit 0
 
       - name: JSON output is valid and schema-versioned
         shell: pwsh
@@ -141,6 +147,7 @@ jobs:
           if ($d.verdict -ne 'CONFIRMED') { Write-Host "FAIL: bad verdict $($d.verdict)"; exit 1 }
           if ($d.exit_code -ne $code) { Write-Host "FAIL: exit_code $($d.exit_code) != $code"; exit 1 }
           Write-Host 'ok   JSON schema, verdict, and exit code agree'
+          exit 0
 
       - name: Report does not echo matched file contents
         shell: pwsh
@@ -154,3 +161,4 @@ jobs:
             Write-Host 'FAIL: report echoed matched file contents'; exit 1
           }
           Write-Host 'ok   no file contents in the report'
+          exit 0

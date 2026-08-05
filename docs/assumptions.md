@@ -413,3 +413,17 @@ the CIM path is used there. Static analysis cannot see the platform guard. Invok
 a variable is also more explicit about calling the Unix binary rather than a cmdlet.
 **Recorded by:** Claude
 **Date:** 2026-08-05
+
+---
+
+**Assumption:** The missing-hash-coverage warning keys off the SIGNATURE SET, not off an
+empty candidate list.
+**Why:** The first version warned whenever the hash candidate list came out empty, which is
+the normal state of a clean host with no matching files. It therefore fired on healthy
+machines, telling operators "hash checks will find nothing" — which reads as a broken tool
+and trains them to ignore its output, the same dynamic that makes a noisy signature worse
+than no signature. Coverage is a property of the signature set (hash records with no
+FILENAME/PATHGLOB to bring a file into scope), not of the host being scanned. Found by
+running the real deployment path against the public repository rather than a fixture.
+**Recorded by:** Claude
+**Date:** 2026-08-05

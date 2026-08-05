@@ -77,7 +77,7 @@ param(
 
     [long] $MaxFileSize = 8388608,
 
-    [int] $TimeoutSeconds = 3600,
+    [int] $TimeoutSeconds = 7200,
 
     # Skips the content and hash sweeps: the two stages whose cost is proportional
     # to BYTES rather than to file count. Deliberate coverage choice, not a

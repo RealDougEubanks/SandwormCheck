@@ -50,7 +50,7 @@ SCAN_PATHS=""
 EXCLUDE_PATHS=""
 MAX_DEPTH=12
 MAX_FILE_SIZE=8388608   # 8 MiB
-TIMEOUT_SECS=3600
+TIMEOUT_SECS=7200
 OUTPUT_MODE="text"
 QUIET=0
 FAST=0
@@ -121,7 +121,7 @@ Options:
       --max-depth N       Directory walk depth limit (1-64, default 12)
       --max-file-size N   Skip files larger than N bytes for hash/content
                           checks (1024-1073741824, default 8388608)
-      --timeout N         Wall-clock scan limit in seconds (10-86400, default 3600)
+      --timeout N         Wall-clock scan limit in seconds (10-86400, default 7200)
       --fast              Skip the content and hash sweeps. Keeps every cheap
                           high-signal check and finishes in seconds even on a
                           machine with hundreds of repositories.

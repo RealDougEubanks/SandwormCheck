@@ -92,7 +92,7 @@ the payload is ~728 KB. Raise it only if you have a reason to.
 
 ### `--timeout N` / `-TimeoutSeconds N`
 
-Wall-clock ceiling for the whole scan, 10–86400, default 3600.
+Wall-clock ceiling for the whole scan, 10–86400, default 7200.
 
 The walk stage is bounded by killing `find` when the budget expires, so the ceiling holds
 even inside a slow subtree. Measured overshoot on the shell scanner is about 15–22%, because
@@ -195,7 +195,7 @@ It reports a normal verdict (`CLEAN (fast)`, `SUSPECT`, `CONFIRMED`) rather than
 
 ```sh
 sudo ./sandwormcheck.sh --fast          # daily sweep
-sudo ./sandwormcheck.sh --timeout 3000  # weekly, full coverage
+sudo ./sandwormcheck.sh --timeout 7200  # weekly, full coverage
 ```
 
 ### `-q`, `--quiet` / `-Quiet`

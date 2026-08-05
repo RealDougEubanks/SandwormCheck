@@ -134,6 +134,26 @@ One JSON object on stdout. Diagnostics stay on stderr, so stdout is always parse
 The `schema` field is versioned. Anything consuming this output should check it before
 reading fields, so a future `sandwormcheck/v2` does not break your pipeline silently.
 
+### How to triage a finding before escalating
+
+The scanner reports paths and signature IDs, never file contents, so the first look is
+yours. Three checks resolve most reports:
+
+1. **Size, for payload signatures.** `ls -l <path>`. The payload is ~728 KB. A file of a few
+   KB with the same name is a data file.
+2. **Position.** A payload sits at a package root (`node_modules/<pkg>/Math_Symbol.js`).
+   Deeper nesting under a category or data directory suggests a legitimate package.
+3. **Corroboration.** One content match alone is weak — those strings appear in vendor
+   advisories and incident notes. A payload filename *plus* a matching hash *plus* a
+   persistence artifact is a real compromise. Isolate on corroboration, not on a single
+   content hit.
+
+`--verbose` shows why a candidate was rejected, including size-floor decisions:
+
+```
+sandwormcheck: size floor: /path/Math_Symbol.js is 1074B, under 102400B required by SH25-F003
+```
+
 ### `-x`, `--exclude PATH` / `-Exclude PATH`
 
 Do not scan under `PATH`. Repeatable.
@@ -229,6 +249,14 @@ If a scan is slow, run with `--verbose` to see which root is responsible, then n
 with `--path` or lower `--max-depth`.
 
 ## Troubleshooting
+
+**A `CONFIRMED` finding on `Math_Symbol.js` under `regenerate-unicode-properties`**
+Fixed, but worth recognising if you see an old report. `Math_Symbol.js` is both the worm's
+~728 KB payload and a legitimate 1 KB Unicode data file shipped by
+`regenerate-unicode-properties` at `General_Category/Math_Symbol.js` — a transitive
+dependency of Babel, so present in most JS projects. Signatures now require the file to sit
+at a package *root* **and** be at least 100 KB. Check the size: a payload is ~728,000 bytes,
+the Unicode file about 1,074.
 
 **A `CONFIRMED` finding on a file that is documentation, not malware**
 `CONTENT` signatures match distinctive strings from the campaign, and those strings appear

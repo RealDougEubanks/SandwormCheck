@@ -104,8 +104,8 @@ CHECK_TYPE|SEVERITY|ID|PATTERN|DESCRIPTION
 | Type | `PATTERN` semantics | Notes |
 |---|---|---|
 | `PATHEXISTS` | Absolute path, `~` expanded, shell glob allowed | Persistence artifacts |
-| `FILENAME` | Exact basename, matched anywhere under a scan root | Dropped payloads |
-| `PATHGLOB` | Glob matched against the full discovered path | Filenames too common to match on basename alone |
+| `FILENAME` | Exact basename, matched anywhere under a scan root. Optional `>=<bytes> ` size floor | Dropped payloads |
+| `PATHGLOB` | Glob against the full path; `*` stays within one segment, `**` crosses. Optional `>=<bytes> ` size floor | Filenames too common to match on basename alone |
 | `SHA256` | 64 hex chars, compared against candidate files | Highest confidence |
 | `SHA1` | 40 hex chars | Some vendors published SHA-1 only |
 | `PKGVER` | `name@version`, exact match against `package.json` **and lockfiles** | Vulnerable-version detection |
@@ -118,7 +118,30 @@ between `grep` and .NET is a correctness trap), and version *ranges* for `PKGVER
 discrete bad versions, so enumerate them). Note this means a lockfile *range spec*
 such as `"keyv": "^6.0.0"` is not matched; only the resolved version is.
 
-### 4.2 Process coverage
+### 4.2 Filename collisions with legitimate packages
+
+A payload filename is not automatically distinctive. The worm's ~728 KB Bun bundle is named
+`Math_Symbol.js`, and `regenerate-unicode-properties` ships a legitimate 1 KB Unicode
+codepoint list at `General_Category/Math_Symbol.js`. `Math_Symbol` is the real Unicode
+category `Sm`, and that package is a transitive dependency of `@babel/plugin-transform-*`,
+so it appears in a large share of all JavaScript projects. Matching the basename at
+`CONFIRMED` produced five findings on an untouched host and instructed the operator to
+isolate it and rotate every credential.
+
+Two independent discriminators are used, and either alone would have prevented it:
+
+1. **Position.** The loader writes the payload at a package *root*
+   (`node_modules/keyv/Math_Symbol.js`); the Unicode file sits one level deeper under
+   `General_Category/`. Expressing that requires `*` not to cross a separator, which is why
+   `PATHGLOB` has real glob semantics rather than treating `*` as "any characters".
+2. **Size.** A `>=<bytes> ` prefix on the pattern requires a minimum file size. 728 KB
+   versus 1 KB is not a close call.
+
+The general rule for signature authoring: before adding a filename signature, check whether
+the name exists in the registry. A name that looks distinctive may have been chosen
+*because* it blends into common dependency trees.
+
+### 4.3 Process coverage
 
 Filesystem checks alone leave a false-clean hole: this campaign's dead-man's switch
 polls GitHub every 60 seconds, and the payload has a 24-hour TTL self-destruct, so
@@ -160,7 +183,7 @@ is *loaded* (as opposed to its file existing), the `loginctl enable-linger` mark
 and the npm cache. A `launchctl`/`systemctl` query would catch a unit that is
 registered while its plist has been deleted.
 
-### 4.3 Lockfile coverage
+### 4.4 Lockfile coverage
 
 `PKGVER` matches two independent sources:
 
@@ -221,7 +244,7 @@ git, `file:`, `link:`, and `workspace:` dependencies; yarn berry `patch:`
 resolutions, which are percent-encoded; pnpm and bun alias forms; and npm entries
 that carry no `resolved` field.
 
-### 4.4 Severity
+### 4.5 Severity
 
 - `CONFIRMED` — the artifact has no benign explanation. Payload files, matching
   hashes, host persistence units, exfil markers.

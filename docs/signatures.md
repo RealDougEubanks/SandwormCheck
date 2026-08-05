@@ -67,13 +67,48 @@ thousands of legitimate files.
 For filenames too common to match on basename alone. Write patterns with forward slashes;
 the Windows port normalizes separators before comparing.
 
+**Glob semantics**
+
+| Token | Matches |
+|---|---|
+| `*` | any characters **within one path segment** — does not cross `/` |
+| `**` | any characters, crossing `/` |
+| `**/` | any number of segments, including none |
+| `?` | one character, not `/` |
+
 ```
-PATHGLOB|CONFIRMED|EX-004|*/.claude/setup.mjs|Loader injected into the Claude Code config dir
+PATHGLOB|CONFIRMED|EX-004|**/.claude/setup.mjs|Loader in the Claude Code config dir
+PATHGLOB|CONFIRMED|EX-005|**/node_modules/*/payload.js|Directly inside a package dir
 ```
 
-This is the type that exists specifically because `setup.mjs` is a perfectly normal
-filename. `FILENAME|setup.mjs` would flag half the ecosystem; `PATHGLOB` flags only the
-directory the malware actually writes to.
+The distinction matters. `**/node_modules/*/payload.js` matches
+`node_modules/keyv/payload.js` but **not**
+`node_modules/somepkg/subdir/payload.js`, because a single `*` cannot cross a separator.
+That is what lets a signature say "at a package root" rather than "anywhere underneath".
+
+**Optional size floor**
+
+Prefix a pattern with `>=<bytes> ` to require a minimum file size:
+
+```
+PATHGLOB|CONFIRMED|EX-006|>=102400 **/node_modules/*/Math_Symbol.js|Payload bundle
+```
+
+This exists because of a real false positive. `Math_Symbol.js` is the name of the worm's
+~728 KB payload **and** of a legitimate 1 KB Unicode data file that
+`regenerate-unicode-properties` ships at `General_Category/Math_Symbol.js`. That package is
+a transitive dependency of `@babel/plugin-transform-*`, so it is present in a large share
+of all JavaScript projects — a basename match reported five findings on a host nobody had
+touched in months and told the operator to rotate every credential.
+
+Position and size are independent discriminators, and the shipped signature uses both. If a
+signature can be given a size floor, give it one: a data file and a bundled payload rarely
+resemble each other in size, and it costs one `stat` per match.
+
+`FILENAME` accepts the same prefix.
+
+This type also exists because `setup.mjs` is a perfectly normal filename. `FILENAME` on it
+would flag half the ecosystem; `PATHGLOB` flags only the directories the malware writes to.
 
 ### `SHA256` / `SHA1` — file digest
 

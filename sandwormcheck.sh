@@ -581,6 +581,10 @@ load_signatures() {
 					if (pat !~ /^[0-9a-fA-F]{40}$/)
 						fail(FNR, id ": SHA1 must be 40 hex characters, got " length(pat))
 					pat = tolower(pat)
+				} else if (type == "PATHGLOB" || type == "FILENAME") {
+					# An optional ">=N " size floor must be well formed if present.
+					if (pat ~ /^>=/ && pat !~ /^>=[0-9]+ ./)
+						fail(FNR, id ": size floor must be \x27>=<bytes> <pattern>\x27")
 				} else if (type == "PKGVER") {
 					if (index(pat, "@") == 0)
 						fail(FNR, id ": PKGVER must be name@version")
@@ -707,7 +711,8 @@ walk() {
 	find -H "$_root" -maxdepth "$MAX_DEPTH" \
 		\( -name .git -o -name .Trash -o -name Caches \
 		-o -name CloudStorage -o -name .npm-cache \
-		-o -name file-history -o -name .history \) -prune -o \
+		-o -name file-history -o -name .history \
+		-o -path '*/.claude/projects' \) -prune -o \
 		-type f -print 2>/dev/null || :
 }
 
@@ -746,42 +751,70 @@ glob_report() {
 }
 
 check_filenames_and_globs() {
-	# One awk pass over the candidate list for both types. The previous form ran
-	# a shell `while read` loop per signature over the whole list, which on a real
-	# tree of a few hundred thousand candidates costs seconds per signature.
+	# One awk pass over the candidate list for both types.
 	[ -s "$CANDIDATES_FILE" ] || return 0
 
 	awk -F'|' '
-		function globToRe(g,   out, i, c) {
-			# Signature globs use only * and ?, so a small translation is enough.
-			out = "^"
-			for (i = 1; i <= length(g); i++) {
+		# Glob semantics: * matches within ONE path segment, ** crosses segments,
+		# and **/ also matches zero segments.
+		#
+		# An earlier version expanded * to .* so it crossed slashes, which made it
+		# impossible to express "directly inside a package directory". That mattered:
+		# Math_Symbol.js is ALSO a legitimate Unicode data file, shipped by
+		# regenerate-unicode-properties at General_Category/Math_Symbol.js. That
+		# package is a transitive dependency of @babel/plugin-transform-*, so it is
+		# present in a large share of all JS projects, and matching on basename
+		# reported those hosts as a confirmed compromise.
+		function globToRe(g,   out, i, c, n) {
+			out = "^"; i = 1; n = length(g)
+			while (i <= n) {
 				c = substr(g, i, 1)
-				if (c == "*") out = out ".*"
-				else if (c == "?") out = out "."
-				else if (c ~ /[.\[\]()+^$\\{}|\/]/) out = out "\\" c
+				if (c == "*") {
+					if (substr(g, i+1, 1) == "*") {
+						if (substr(g, i+2, 1) == "/") { out = out "(.*/)?"; i += 3; continue }
+						out = out ".*"; i += 2; continue
+					}
+					out = out "[^/]*"; i++; continue
+				}
+				if (c == "?") { out = out "[^/]"; i++; continue }
+				if (c ~ /[.[\]()+^$\\{}|]/) out = out "\\" c
 				else out = out c
+				i++
 			}
 			return out "$"
 		}
 		$1=="FILENAME" || $1=="PATHGLOB" {
 			desc=$5
 			for (i=6; i<=NF; i++) desc = desc "|" $i
+			pat = $4
+			minsz = 0
+			# Optional ">=N " size floor. The payload is a ~728 KB Bun bundle and the
+			# legitimate Unicode file of the same name is about 1 KB, so size alone
+			# separates them even where a path check would not.
+			if (match(pat, /^>=[0-9]+ /)) {
+				minsz = substr(pat, 3, RLENGTH - 3) + 0
+				pat = substr(pat, RLENGTH + 1)
+			}
 			n++
-			type[n]=$1; sev[n]=$2; id[n]=$3; pat[n]=$4; d[n]=desc
-			if ($1=="PATHGLOB") re[n] = globToRe($4)
+			type[n]=$1; sev[n]=$2; id[n]=$3; d[n]=desc; msz[n]=minsz; raw[n]=pat
+			if ($1=="PATHGLOB") re[n] = globToRe(pat)
 		}
-		END { for (i=1; i<=n; i++) printf "%s\t%s\t%s\t%s\t%s\t%s\n", type[i], sev[i], id[i], pat[i], d[i], re[i] }
+		END {
+			for (i=1; i<=n; i++)
+				printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", type[i], sev[i], id[i], raw[i], d[i], re[i], msz[i]
+		}
 	' "$WORKDIR/sigs" >"$WORKDIR/fnsigs" 2>/dev/null || :
 	[ -s "$WORKDIR/fnsigs" ] || return 0
 
+	# Candidate hits first; the size floor is applied afterwards so a size is looked
+	# up only for the few paths that actually matched.
 	awk -v sigfile="$WORKDIR/fnsigs" '
 		BEGIN {
 			FS = "\t"
 			while ((getline line < sigfile) > 0) {
 				split(line, f, "\t")
 				n++
-				type[n]=f[1]; sev[n]=f[2]; id[n]=f[3]; pat[n]=f[4]; d[n]=f[5]; re[n]=f[6]
+				type[n]=f[1]; sev[n]=f[2]; id[n]=f[3]; pat[n]=f[4]; d[n]=f[5]; re[n]=f[6]; msz[n]=f[7]+0
 				if (f[1] == "FILENAME") byname[f[4]] = byname[f[4]] n ","
 			}
 			close(sigfile)
@@ -797,16 +830,30 @@ check_filenames_and_globs() {
 				cnt = split(byname[leaf], idx, ",")
 				for (j = 1; j <= cnt; j++) {
 					k = idx[j] + 0
-					if (k) printf "%s|%s|%s|filename match|%s\n", sev[k], id[k], path, d[k]
+					if (k) printf "%s\t%s\t%s\t%s\tfilename match\t%s\n", msz[k], sev[k], id[k], path, d[k]
 				}
 			}
 			for (k = 1; k <= n; k++) {
 				if (type[k] == "PATHGLOB" && path ~ re[k])
-					printf "%s|%s|%s|path glob match|%s\n", sev[k], id[k], path, d[k]
+					printf "%s\t%s\t%s\t%s\tpath glob match\t%s\n", msz[k], sev[k], id[k], path, d[k]
 			}
 		}
-	' "$CANDIDATES_FILE" >>"$FINDINGS_FILE" 2>/dev/null || :
+	' "$CANDIDATES_FILE" >"$WORKDIR/fnhits" 2>/dev/null || :
+	[ -s "$WORKDIR/fnhits" ] || return 0
+
+	while IFS="$(printf '\t')" read -r _min _sev _id _path _detail _desc; do
+		[ -n "$_id" ] || continue
+		if [ "${_min:-0}" -gt 0 ]; then
+			_sz=$(file_size "$_path")
+			if [ "${_sz:-0}" -lt "$_min" ]; then
+				info "size floor: $_path is ${_sz}B, under ${_min}B required by $_id"
+				continue
+			fi
+		fi
+		printf '%s|%s|%s|%s|%s\n' "$_sev" "$_id" "$_path" "$_detail" "$_desc" >>"$FINDINGS_FILE"
+	done <"$WORKDIR/fnhits"
 }
+
 
 check_hashes() {
 	# check_hashes <lowercase_algo> <uppercase_check_type>
@@ -1335,7 +1382,7 @@ build_file_lists() {
 	: >"$WORKDIR/namepat"
 	{
 		sigs_of_type FILENAME | cut -d'|' -f4
-		sigs_of_type PATHGLOB | cut -d'|' -f4 | sed 's|.*/||'
+		sigs_of_type PATHGLOB | cut -d'|' -f4 | sed 's|^>=[0-9]* ||' | sed 's|.*/||'
 	} | sort -u | while IFS= read -r n; do
 		[ -n "$n" ] || continue
 		case $n in

@@ -93,6 +93,10 @@ just not by its manifest. Stated in the README rather than left implicit.
 
 ## Known false-positive sources
 
+- **Payload filenames can collide with legitimate packages.** Fixed for `Math_Symbol.js`
+  (position plus a size floor) after a live false positive, but the class remains: any
+  filename signature can collide. Mitigation is procedural — check the registry before
+  adding one, and add a size floor where the artifact has a characteristic size.
 - **Documentation about the campaign matches the campaign.** `CONTENT` signatures look for
   distinctive strings, and those appear in vendor advisories, IOC feeds, incident tickets,
   and this repository. A host storing any of that produces content matches. The tool's own

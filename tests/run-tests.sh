@@ -31,6 +31,19 @@ cp -R "$TESTDIR/fixtures" "$TMP/fixtures" 2>/dev/null || {
 }
 FIX="$TMP/fixtures"
 
+# The committed payload fixtures are placeholders a few bytes long, so the
+# repository stays small and holds nothing resembling a real payload. Pad them in
+# the copy so the size floor in the payload signatures is actually exercised.
+_pf="$FIX/confirmed/proj/node_modules/keyv/Math_Symbol.js"
+if [ -f "$_pf" ]; then
+	: >"$_pf"
+	_pi=0
+	while [ "$_pi" -lt 200 ]; do
+		printf '%0768d\n' 0 >>"$_pf"
+		_pi=$((_pi + 1))
+	done
+fi
+
 PASS=0
 FAIL=0
 CURRENT_SHELL="sh"
@@ -46,6 +59,23 @@ no() {
 	FAIL=$((FAIL + 1))
 	printf '  FAIL %s\n' "$1"
 	[ $# -ge 2 ] && printf '       %s\n' "$2"
+}
+
+make_payload() {
+	# Write a file large enough to pass the payload signatures' size floor.
+	#
+	# The real payload is a ~728 KB Bun bundle, and the signatures require >=102400
+	# bytes because a legitimate 1 KB Unicode data file shares its name. Fixtures
+	# used to plant a one-line file, which was never realistic: it would not have
+	# been detected on a real host either.
+	_mp=$1
+	mkdir -p "$(dirname "$_mp")"
+	: >"$_mp"
+	_mpi=0
+	while [ "$_mpi" -lt 200 ]; do
+		printf '%0768d\n' 0 >>"$_mp"
+		_mpi=$((_mpi + 1))
+	done
 }
 
 check() {
@@ -118,7 +148,7 @@ test_check_types() {
 	section "check types: true positives [$CURRENT_SHELL]"
 
 	run 20 "scan confirmed tree" --path "$FIX/confirmed" --signatures "$SIGS" --no-color
-	expect_out "SH25-F001" "FILENAME detects Math_Symbol.js"
+	expect_out "SH25-F001" "PATHGLOB detects the payload at a package root"
 	expect_out "SH25-R001" "PATHGLOB detects .claude/setup.mjs"
 	expect_out "SH25-R002" "PATHGLOB detects .vscode/setup.mjs"
 	expect_out "SH25-M001" "CONTENT detects the Shai-Hulud exfil marker"
@@ -348,7 +378,7 @@ test_symlinked_root() {
 	# symlink to private/tmp; a relocated home directory is often a symlink too.
 	# This was a false clean, the worst failure mode this tool has.
 	mkdir -p "$TMP/symreal/proj/node_modules/keyv"
-	printf 'inert fixture\n' >"$TMP/symreal/proj/node_modules/keyv/Math_Symbol.js"
+	make_payload "$TMP/symreal/proj/node_modules/keyv/Math_Symbol.js"
 	printf '{"name":"keyv","version":"6.0.0"}\n' >"$TMP/symreal/proj/node_modules/keyv/package.json"
 	ln -sfn "$TMP/symreal" "$TMP/symlink-root"
 
@@ -446,7 +476,7 @@ test_self_exclusion() {
 	# Self-exclusion must not become a blanket blind spot: a payload beside the
 	# install still has to be found.
 	mkdir -p "$TMP/selfdir/victim/proj/node_modules/keyv"
-	printf 'inert\n' >"$TMP/selfdir/victim/proj/node_modules/keyv/Math_Symbol.js"
+	make_payload "$TMP/selfdir/victim/proj/node_modules/keyv/Math_Symbol.js"
 	printf '{"name":"keyv","version":"6.0.0"}\n' \
 		>"$TMP/selfdir/victim/proj/node_modules/keyv/package.json"
 	( cd "$TMP/selfdir/copy" && "$CURRENT_SHELL" ./sandwormcheck.sh \
@@ -553,6 +583,83 @@ test_multi_user_coverage() {
 	fi
 
 	[ "$_bad" -eq 0 ] || no "multi-user enumeration" "see above"
+}
+
+test_payload_name_collision() {
+	section "payload filename collides with a real package [$CURRENT_SHELL]"
+
+	# From a live fleet scan: five CONFIRMED findings on a host nobody had touched
+	# in months, all on
+	#   node_modules/regenerate-unicode-properties/General_Category/Math_Symbol.js
+	# That is a legitimate 1 KB Unicode codepoint list. Math_Symbol is the real
+	# Unicode category Sm, and the package is a transitive dependency of
+	# @babel/plugin-transform-*, so it is present in a large share of all JS
+	# projects. Matching the basename at CONFIRMED reported those hosts as
+	# compromised and told the operator to rotate every credential.
+	#
+	# The fixture holds the file from the actual published tarball.
+	run 0 "the real regenerate-unicode-properties file is not flagged" \
+		--path "$FIX/legit-unicode" --signatures "$SIGS" --no-color
+	refute_out "Math_Symbol" "no finding mentions the legitimate Unicode file"
+	refute_out "gh-token-monitor" "a session transcript discussing the campaign is not flagged"
+
+	# The inverse: a real payload is a ~728 KB bundle at a package ROOT.
+	mkdir -p "$TMP/payload/proj/node_modules/keyv" "$TMP/payload/proj/node_modules/@keyv/redis"
+	for _p in "$TMP/payload/proj/node_modules/keyv" "$TMP/payload/proj/node_modules/@keyv/redis"; do
+		: >"$_p/Math_Symbol.js"
+		_i=0
+		while [ "$_i" -lt 750 ]; do
+			printf '%01024d\n' 0 >>"$_p/Math_Symbol.js"
+			_i=$((_i + 1))
+		done
+		printf '{"name":"x","version":"1.0.0"}\n' >"$_p/package.json"
+	done
+
+	run 20 "a large payload at a package root is CONFIRMED" \
+		--path "$TMP/payload" --signatures "$SIGS" --no-color
+	expect_out "SH25-F001" "unscoped package root is matched"
+	expect_out "SH25-F001b" "scoped package root is matched"
+
+	# And the size floor is doing the work, not just the path: a small file at the
+	# same path must not be confirmed.
+	mkdir -p "$TMP/smallpay/proj/node_modules/keyv"
+	printf 'const set = require("regenerate")(0x2B);\n' >"$TMP/smallpay/proj/node_modules/keyv/Math_Symbol.js"
+	printf '{"name":"keyv","version":"5.5.1"}\n' >"$TMP/smallpay/proj/node_modules/keyv/package.json"
+	run 0 "a small file at a package root is below the size floor" \
+		--path "$TMP/smallpay" --signatures "$SIGS" --no-color
+	refute_out "SH25-F001" "size floor rejected the small file"
+}
+
+test_glob_semantics() {
+	section "PATHGLOB glob semantics [$CURRENT_SHELL]"
+
+	# * must match within one path segment and ** must cross segments. Expanding *
+	# to .* made it impossible to say "directly inside a package directory", which
+	# is the discriminator the payload signature depends on.
+	mkdir -p "$TMP/globt/proj/node_modules/pkg/sub"
+	printf 'x\n' >"$TMP/globt/proj/node_modules/pkg/target.js"
+	printf 'x\n' >"$TMP/globt/proj/node_modules/pkg/sub/target.js"
+	printf '{"name":"pkg","version":"1.0.0"}\n' >"$TMP/globt/proj/node_modules/pkg/package.json"
+
+	cat >"$TMP/glob.conf" <<'EOF'
+#!campaign glob semantics test
+PATHGLOB|CONFIRMED|G-ONE|**/node_modules/*/target.js|one segment after node_modules
+EOF
+	run 20 "single * matches one segment" --path "$TMP/globt" --signatures "$TMP/glob.conf" --no-color
+	expect_out "node_modules/pkg/target.js" "the direct child matched"
+	refute_out "sub/target.js" "single * did NOT cross a separator"
+
+	cat >"$TMP/glob2.conf" <<'EOF'
+#!campaign glob semantics test
+PATHGLOB|CONFIRMED|G-ANY|**/node_modules/**/target.js|any depth after node_modules
+EOF
+	run 20 "** crosses separators" --path "$TMP/globt" --signatures "$TMP/glob2.conf" --no-color
+	expect_out "sub/target.js" "** reached the nested file"
+
+	# A malformed size floor must be rejected rather than silently ignored.
+	printf '#!campaign t\nPATHGLOB|CONFIRMED|G-BAD|>=abc **/x.js|bad size floor\n' >"$TMP/glob3.conf"
+	run 1 "a malformed size floor is a hard error" --path "$TMP/globt" --signatures "$TMP/glob3.conf"
+	expect_err "size floor must be" "the error explains the expected form"
 }
 
 test_signature_validation() {
@@ -860,7 +967,7 @@ test_robustness() {
 	mkdir -p "$TMP/odd/my project (v2)/node_modules/keyv"
 	printf '{"name":"keyv","version":"6.0.0"}\n' \
 		>"$TMP/odd/my project (v2)/node_modules/keyv/package.json"
-	printf 'inert\n' >"$TMP/odd/my project (v2)/node_modules/keyv/Math_Symbol.js"
+	make_payload "$TMP/odd/my project (v2)/node_modules/keyv/Math_Symbol.js"
 	run 20 "paths containing spaces and parentheses are handled" \
 		--path "$TMP/odd" --signatures "$SIGS" --no-color
 	expect_out "my project (v2)" "the odd path appears in the finding"
@@ -882,7 +989,7 @@ test_robustness() {
 	mkdir -p "$TMP/bin/proj/node_modules/pkg"
 	printf '{"name":"pkg","version":"1.0.0"}\n' >"$TMP/bin/proj/node_modules/pkg/package.json"
 	dd if=/dev/urandom of="$TMP/bin/proj/node_modules/pkg/blob.bin" bs=1024 count=64 2>/dev/null
-	printf 'inert\n' >"$TMP/bin/proj/node_modules/pkg/Math_Symbol.js"
+	make_payload "$TMP/bin/proj/node_modules/pkg/Math_Symbol.js"
 	run 20 "binary candidate files do not break the content check" \
 		--path "$TMP/bin" --signatures "$SIGS" --no-color
 
@@ -1046,6 +1153,8 @@ for sh_bin in ${SHELLS:-sh}; do
 	test_symlinked_root
 	test_process_false_positives
 	test_multi_user_coverage
+	test_payload_name_collision
+	test_glob_semantics
 	test_signature_validation
 	test_argument_validation
 	test_output_modes

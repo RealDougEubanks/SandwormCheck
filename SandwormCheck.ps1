@@ -319,7 +319,7 @@ $script:PruneNames = @(
     'INetCache', 'WebCache', 'Microsoft', 'OneDrive', 'Recent',
     # Tool-managed snapshot stores mirror scanned content, so they reproduce every
     # marker string the scanner looks for and generate pure noise.
-    'file-history', '.history'
+    'file-history', '.history', 'projects'
 )
 
 function Get-WalkedFiles {
@@ -416,10 +416,13 @@ function Invoke-FilenameCheck {
     param([object[]] $Signatures, [string[]] $Candidates)
 
     $byName = @{}
+    $mins = @{}
     foreach ($sig in ($Signatures | Where-Object { $_.Type -eq 'FILENAME' })) {
-        $key = $sig.Pattern.ToLowerInvariant()
+        $sf = Split-SizeFloor $sig.Pattern
+        $key = $sf.Pattern.ToLowerInvariant()
         if (-not $byName.ContainsKey($key)) { $byName[$key] = New-Object System.Collections.ArrayList }
         [void] $byName[$key].Add($sig)
+        $mins["$($sig.Id)|$key"] = $sf.Min
     }
     if ($byName.Count -eq 0) { return }
 
@@ -427,10 +430,62 @@ function Invoke-FilenameCheck {
         $leaf = [IO.Path]::GetFileName($file).ToLowerInvariant()
         if ($byName.ContainsKey($leaf)) {
             foreach ($sig in $byName[$leaf]) {
+                $m = $mins["$($sig.Id)|$leaf"]
+                if (-not (Test-SizeFloor $file $m)) { continue }
                 Add-Finding $sig.Severity $sig.Id $file 'filename match' $sig.Description
             }
         }
     }
+}
+
+function Convert-GlobToRegex {
+    param([string] $Glob)
+    # * matches within ONE path segment, ** crosses segments, **/ also matches zero
+    # segments. PowerShell's -like cannot express that, and treating * as "any
+    # characters" made it impossible to say "directly inside a package directory" --
+    # the discriminator that separates the payload from the legitimate
+    # regenerate-unicode-properties/General_Category/Math_Symbol.js.
+    $out = '^'
+    $i = 0
+    while ($i -lt $Glob.Length) {
+        $c = $Glob[$i]
+        if ($c -eq '*') {
+            if ($i + 1 -lt $Glob.Length -and $Glob[$i + 1] -eq '*') {
+                if ($i + 2 -lt $Glob.Length -and $Glob[$i + 2] -eq '/') {
+                    $out += '(.*/)?'; $i += 3; continue
+                }
+                $out += '.*'; $i += 2; continue
+            }
+            $out += '[^/]*'; $i++; continue
+        }
+        if ($c -eq '?') { $out += '[^/]'; $i++; continue }
+        if ('.[]()+^$\{}|' -contains [string]$c) { $out += '\' + $c } else { $out += [regex]::Escape([string]$c) }
+        $i++
+    }
+    return $out + '$'
+}
+
+function Split-SizeFloor {
+    param([string] $Pattern)
+    # ">=N " prefix: the payload is a ~728 KB bundle while the legitimate Unicode
+    # file of the same name is about 1 KB, so size alone separates them.
+    if ($Pattern -match '^>=([0-9]+) (.+)$') {
+        return @{ Min = [long] $Matches[1]; Pattern = $Matches[2] }
+    }
+    return @{ Min = [long] 0; Pattern = $Pattern }
+}
+
+function Test-SizeFloor {
+    param([string] $FilePath, [long] $Min)
+    if ($Min -le 0) { return $true }
+    try {
+        $len = (Get-Item -LiteralPath $FilePath -Force -ErrorAction Stop).Length
+    } catch { return $false }
+    if ($len -lt $Min) {
+        Write-Diag "size floor: $FilePath is ${len}B, under ${Min}B"
+        return $false
+    }
+    return $true
 }
 
 function Invoke-PathGlobCheck {
@@ -439,14 +494,23 @@ function Invoke-PathGlobCheck {
     $globs = @($Signatures | Where-Object { $_.Type -eq 'PATHGLOB' })
     if ($globs.Count -eq 0) { return }
 
+    $compiled = foreach ($sig in $globs) {
+        $sf = Split-SizeFloor $sig.Pattern
+        [PSCustomObject]@{
+            Sig = $sig
+            Rx  = [regex]::new((Convert-GlobToRegex $sf.Pattern), 'IgnoreCase')
+            Min = $sf.Min
+        }
+    }
+
     foreach ($file in $Candidates) {
-        # Signature globs are written with forward slashes; compare on a
-        # normalized copy so one pattern works on both platforms.
+        # Signature globs use forward slashes; compare on a normalized copy so one
+        # pattern works on both platforms.
         $norm = $file -replace '\\', '/'
-        foreach ($sig in $globs) {
-            if ($norm -like $sig.Pattern) {
-                Add-Finding $sig.Severity $sig.Id $file 'path glob match' $sig.Description
-            }
+        foreach ($c in $compiled) {
+            if (-not $c.Rx.IsMatch($norm)) { continue }
+            if (-not (Test-SizeFloor $file $c.Min)) { continue }
+            Add-Finding $c.Sig.Severity $c.Sig.Id $file 'path glob match' $c.Sig.Description
         }
     }
 }
@@ -877,8 +941,12 @@ function Select-Candidates {
     param([string[]] $AllFiles, [object[]] $Signatures)
 
     $names = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($sig in ($Signatures | Where-Object { $_.Type -eq 'FILENAME' })) {
-        [void] $names.Add($sig.Pattern)
+    foreach ($sig in ($Signatures | Where-Object { $_.Type -eq 'FILENAME' -or $_.Type -eq 'PATHGLOB' })) {
+        # Strip any ">=N " size floor, then take the trailing path component so the
+        # basename still enters the hash candidate set.
+        $pv = (Split-SizeFloor $sig.Pattern).Pattern
+        $leaf = ($pv -split '/')[-1]
+        if ($leaf -and $leaf -notmatch '[*?]') { [void] $names.Add($leaf) }
     }
     foreach ($n in @('settings.json', 'tasks.json', 'package.json', 'setup.mjs')) {
         [void] $names.Add($n)

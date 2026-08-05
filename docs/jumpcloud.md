@@ -21,84 +21,52 @@ surfaced.
 
 ## JumpCloud Commands
 
-### macOS and Linux
+### Where the command bodies live
 
-Command type **Mac** / **Linux**, run as `root`.
+**Use the self-contained snippets in the [README](../README.md#self-updating-runner-recommended).**
+They are deliberately the single copy: this document previously carried its own
+git-only versions, they drifted from the ones that gained a zip fallback, and hosts
+without git kept failing with `git not found` while the fallback existed elsewhere
+in the repository. One copy, kept correct, beats two that disagree.
+
+Those snippets need no prerequisites beyond a shell. They use git when it is
+present and download an archive when it is not, so a Windows box without git works
+without any preparation.
+
+### JumpCloud specifics to add on top
+
+**macOS / Linux** — command type **Mac** or **Linux**, run as `root`. Paste the
+README's shell snippet, and set the timeout below JumpCloud's own command timeout:
 
 ```sh
-#!/bin/sh
-# SandwormCheck — npm supply chain compromise scan
-# Exit: 0 clean | 10 suspect | 20 CONFIRMED | 1 scanner error | 2 usage error
-set -u
-
-REPO="https://github.com/RealDougEubanks/SandwormCheck.git"
-DEST="/opt/sandwormcheck"
-
-if [ -d "$DEST/.git" ]; then
-    git -C "$DEST" fetch --quiet origin && git -C "$DEST" reset --hard --quiet origin/main
-else
-    rm -rf "$DEST"
-    git clone --depth 1 --quiet "$REPO" "$DEST" || {
-        echo "sandwormcheck: could not fetch the scanner" >&2
-        exit 1
-    }
-fi
-
-sh "$DEST/sandwormcheck.sh" --timeout 600
+sh "$DEST/sandwormcheck.sh" --timeout 1500
 ```
 
-If a host has no git, use `tools/run-latest.sh` / `tools/run-latest.ps1` instead of the
-inline snippets: they fall back to downloading a zip of the ref. If your fleet has no
-outbound access at all, drop the repo into your golden image or push it with a JumpCloud
-file distribution policy and reduce the command to the final line.
+Root matters. Home directories come from the OS user database, so every account is
+covered — including macOS's root account at `/var/root` — but only if the scan can
+read them.
 
-Run as root (Mac/Linux) or SYSTEM (Windows). Home directories are enumerated from the OS
-user database, so every account is covered — including macOS's root account at `/var/root`
-— but only if the scan can read them.
+**Windows** — command type **Windows**, which runs as SYSTEM in PowerShell. Paste
+the README's PowerShell snippet. Two details in it are load-bearing for a service
+account:
 
-The same snippets, hardened and with a stale-copy fallback, ship as
-`tools/run-latest.sh` and `tools/run-latest.ps1`. The README's
-"Self-updating runner" section explains why the ref is worth pinning for a
-production fleet.
+- `exit $LASTEXITCODE` on the last line. Without it the policy reports the
+  wrapper's status and every host looks clean.
+- `[IO.Path]::GetTempPath()` rather than `$env:TEMP`, which is not guaranteed to be
+  set for the account a fleet agent runs under.
 
-### Windows
+JumpCloud's Windows runner uses **Windows PowerShell 5.1**, not PowerShell 7. The
+port is written for 5.1 — sources are pure ASCII so a BOM-less file is not read as
+ANSI, and numeric bounds are validated in code rather than with `[ValidateRange]` —
+but CI exercises PowerShell 7. Run it manually on one host before trusting it
+fleet-wide.
 
-Command type **Windows**, which runs as SYSTEM in PowerShell.
+### If the fleet has no outbound access
 
-```powershell
-# SandwormCheck — npm supply chain compromise scan
-# Exit: 0 clean | 10 suspect | 20 CONFIRMED | 1 scanner error | 2 usage error
-$ErrorActionPreference = 'Stop'
-
-$repo = 'https://github.com/RealDougEubanks/SandwormCheck.git'
-$dest = 'C:\ProgramData\SandwormCheck'
-
-try {
-    if (Test-Path (Join-Path $dest '.git')) {
-        git -C $dest fetch --quiet origin
-        git -C $dest reset --hard --quiet origin/main
-    } else {
-        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-        git clone --depth 1 --quiet $repo $dest
-    }
-} catch {
-    [Console]::Error.WriteLine("sandwormcheck: could not fetch the scanner: $($_.Exception.Message)")
-    exit 1
-}
-
-# Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
-# would be reported as a clean scan of a host that was never scanned.
-$global:LASTEXITCODE = $null
-& (Join-Path $dest 'SandwormCheck.ps1') -TimeoutSeconds 600
-if ($null -eq $LASTEXITCODE) {
-    [Console]::Error.WriteLine('sandwormcheck: scanner produced no exit code')
-    exit 1
-}
-exit $LASTEXITCODE
-```
-
-`exit $LASTEXITCODE` on the last line is load-bearing. Without it the policy reports the
-wrapper's status, not the scanner's, and every host looks clean.
+Drop the repository into your golden image, or push it with a JumpCloud file
+distribution policy, and reduce the command to the final scan line. `tools/run-latest.sh`
+and `tools/run-latest.ps1` are the same update logic with more diagnostics, useful
+once the repo is already on the host.
 
 ### Capturing structured results
 

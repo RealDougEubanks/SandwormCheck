@@ -187,85 +187,135 @@ them — you need the update logic before you have the repo.
 
 ### macOS and Linux
 
+Self-contained: uses git when present, downloads a zip when not.
+
 ```sh
 #!/bin/sh
 # SandwormCheck: update from the public repo, then scan this host.
 # Exit: 0 clean | 10 suspect | 20 CONFIRMED compromise | 1 scanner error | 2 usage
 set -u
-REPO=https://github.com/RealDougEubanks/SandwormCheck.git
+SLUG=RealDougEubanks/SandwormCheck
 DEST=/opt/sandwormcheck
-REF=main
+REF=main                  # pin a reviewed tag for production fleets
 
-command -v git >/dev/null 2>&1 || { echo "git not found" >&2; exit 1; }
+updated=0
+if command -v git >/dev/null 2>&1; then
+    if [ -d "$DEST/.git" ]; then
+        git -C "$DEST" fetch --quiet --depth 1 origin "$REF" 2>/dev/null &&
+            git -C "$DEST" reset --hard --quiet FETCH_HEAD 2>/dev/null && updated=1
+    else
+        rm -rf "$DEST"; mkdir -p "$(dirname "$DEST")"
+        git clone --quiet --depth 1 --branch "$REF" \
+            "https://github.com/$SLUG.git" "$DEST" 2>/dev/null && updated=1
+    fi
+fi
 
-if [ -d "$DEST/.git" ]; then
-    git -C "$DEST" fetch --quiet --depth 1 origin "$REF" &&
-        git -C "$DEST" reset --hard --quiet FETCH_HEAD
-else
-    rm -rf "$DEST"
-    mkdir -p "$(dirname "$DEST")"
-    git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST"
+if [ "$updated" -eq 0 ]; then
+    # No git, or git failed: fetch an archive instead.
+    TMP=$(mktemp -d) || exit 1
+    for U in "https://codeload.github.com/$SLUG/zip/refs/tags/$REF" \
+             "https://codeload.github.com/$SLUG/zip/refs/heads/$REF"; do
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$U" -o "$TMP/s.zip" 2>/dev/null && break
+        else
+            wget -q "$U" -O "$TMP/s.zip" 2>/dev/null && break
+        fi
+        rm -f "$TMP/s.zip"
+    done
+    if [ -s "$TMP/s.zip" ] && unzip -q "$TMP/s.zip" -d "$TMP/x" 2>/dev/null; then
+        INNER=$(find "$TMP/x" -maxdepth 1 -mindepth 1 -type d | head -1)
+        # Validate before replacing, so a bad download cannot destroy a working copy.
+        if [ -n "$INNER" ] && [ -f "$INNER/sandwormcheck.sh" ]; then
+            rm -rf "$DEST"; mkdir -p "$(dirname "$DEST")"
+            mv "$INNER" "$DEST" && chmod +x "$DEST/sandwormcheck.sh" && updated=1
+        fi
+    fi
+    rm -rf "$TMP"
 fi
 
 [ -f "$DEST/sandwormcheck.sh" ] || {
-    echo "update failed and no usable copy at $DEST" >&2
+    echo "could not obtain SandwormCheck and no usable copy at $DEST" >&2
     exit 1
 }
+[ "$updated" -eq 1 ] || echo "WARNING: update failed; scanning with the existing copy" >&2
 
-sh "$DEST/sandwormcheck.sh" --timeout 900
+sh "$DEST/sandwormcheck.sh" --timeout 1500
 ```
 
 ### Windows
 
+Self-contained: uses git when present, downloads a zip when not. Nothing to install.
+
 ```powershell
 # SandwormCheck: update from the public repo, then scan this host.
 # Exit: 0 clean | 10 suspect | 20 CONFIRMED compromise | 1 scanner error | 2 usage
-$repo = 'https://github.com/RealDougEubanks/SandwormCheck.git'
+$ErrorActionPreference = 'Continue'
+$slug = 'RealDougEubanks/SandwormCheck'
 $dest = Join-Path $env:ProgramData 'SandwormCheck'
-$ref  = 'main'
+$ref  = 'main'          # pin a reviewed tag for production fleets
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    [Console]::Error.WriteLine('git not found'); exit 1
+$updated = $false
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    if (Test-Path (Join-Path $dest '.git')) {
+        git -C $dest fetch --quiet --depth 1 origin $ref 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            git -C $dest reset --hard --quiet FETCH_HEAD 2>&1 | Out-Null
+            $updated = ($LASTEXITCODE -eq 0)
+        }
+    } else {
+        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+        git clone --quiet --depth 1 --branch $ref "https://github.com/$slug.git" $dest 2>&1 | Out-Null
+        $updated = ($LASTEXITCODE -eq 0)
+    }
 }
 
-if (Test-Path (Join-Path $dest '.git')) {
-    git -C $dest fetch --quiet --depth 1 origin $ref
-    if ($LASTEXITCODE -eq 0) { git -C $dest reset --hard --quiet FETCH_HEAD }
-} else {
-    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-    git clone --quiet --depth 1 --branch $ref $repo $dest
+if (-not $updated) {
+    # No git, or git failed: fetch an archive instead. Windows PowerShell 5.1 does
+    # not negotiate TLS 1.2 by default, hence the explicit setting.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # [IO.Path]::GetTempPath() rather than $env:TEMP, which is not guaranteed to be
+    # set for a service account such as the one a fleet agent runs under.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("swc-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $zip = Join-Path $tmp 'src.zip'
+    foreach ($u in @("https://codeload.github.com/$slug/zip/refs/tags/$ref",
+                     "https://codeload.github.com/$slug/zip/refs/heads/$ref")) {
+        try { Invoke-WebRequest -Uri $u -OutFile $zip -UseBasicParsing -ErrorAction Stop; break }
+        catch { }
+    }
+    if (Test-Path $zip) {
+        Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+        $inner = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
+        # Validate before replacing, so a bad download cannot destroy a working copy.
+        if ($inner -and (Test-Path (Join-Path $inner.FullName 'SandwormCheck.ps1'))) {
+            if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+            $parent = Split-Path -Parent $dest
+            if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            Move-Item -LiteralPath $inner.FullName -Destination $dest -Force
+            $updated = $true
+        }
+    }
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
 $scanner = Join-Path $dest 'SandwormCheck.ps1'
 if (-not (Test-Path $scanner)) {
-    [Console]::Error.WriteLine("update failed and no usable copy at $dest"); exit 1
+    [Console]::Error.WriteLine("could not obtain SandwormCheck and no usable copy at $dest")
+    exit 1
+}
+if (-not $updated) {
+    [Console]::Error.WriteLine('WARNING: update failed; scanning with the existing copy')
 }
 
-# $LASTEXITCODE must be cleared first: if the scanner fails to start, a stale 0
-# from git would report this host as clean when it was never scanned.
+# Clear $LASTEXITCODE first: if the scanner fails to start, a stale 0 from git
+# would report this host as clean when it was never scanned.
 $global:LASTEXITCODE = $null
-& $scanner -TimeoutSeconds 900
+& $scanner -TimeoutSeconds 1500
 if ($null -eq $LASTEXITCODE) {
     [Console]::Error.WriteLine('scanner produced no exit code'); exit 1
 }
 exit $LASTEXITCODE
 ```
-
-### If git is not installed
-
-Both `tools/run-latest.*` fall back to downloading a zip of the ref from
-`codeload.github.com`, expanding it, and running from that. A git host that fails to
-update also falls back rather than scanning with a stale copy. The archive is validated
-(it must actually contain the scanner) before the previous copy is replaced, so a failed
-update leaves a working install in place.
-
-An archive carries no history and no signature — the same trust level as a shallow clone
-over HTTPS, so nothing is given up. On Unix the fallback needs `curl` or `wget` plus
-`unzip`; on Windows it uses `Invoke-WebRequest` and `Expand-Archive`, with TLS 1.2 forced
-because Windows PowerShell 5.1 does not default to it.
-
-The inline snippets above use git only. Use `tools/run-latest.sh` /
-`tools/run-latest.ps1` if any of your fleet lacks git.
 
 ### Two things to get right
 

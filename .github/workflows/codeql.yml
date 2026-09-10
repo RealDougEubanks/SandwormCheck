@@ -1,0 +1,49 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly on Monday morning, offset from the CI run to spread load.
+    - cron: '41 5 * * 1'
+
+# Least privilege: read source, write security events to the Security tab.
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The scanners are shell and PowerShell, neither of which CodeQL
+        # supports. The test fixtures contain JavaScript, so CodeQL has
+        # something to analyze and the Security tab stays active for any
+        # JS helpers added later.
+        language: [javascript-typescript]
+
+    steps:
+      # Third-party actions are pinned to a commit SHA, not a tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3.38.0
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3.38.0
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3.38.0
+        with:
+          category: /language:${{ matrix.language }}

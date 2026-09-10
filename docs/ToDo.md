@@ -35,6 +35,13 @@
 
 ## Planned
 
+- **Enable required commit signing on `main`.** The branch protection rule is not yet
+  set. Prerequisite: configure SSH signing locally (`gpg.format = ssh`,
+  `user.signingkey = ~/.ssh/id_ed25519.pub`, `commit.gpgsign = true`) and register the
+  key as a signing key on GitHub (Settings → SSH and GPG keys → New signing key).
+  The squash-merge workflow already produces GitHub-signed commits on `main`; enabling
+  the rule has no day-to-day impact once local signing is configured. See
+  `tools/setup-repo-protection.sh` for the API call once prerequisites are met.
 - **A nested `npm-shrinkwrap.json` hit is reported like a project-level pin.** Nested
   lockfiles are skipped except shrinkwraps (npm honors those), but when one does fire the
   wording does not say the pin belongs to a dependency rather than to this project.

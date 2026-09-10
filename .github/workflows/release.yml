@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    # Only changes to shipped code cut a release. Documentation, workflow
+    # files, tests, and developer tooling changes do not.
+    paths:
+      - sandwormcheck.sh
+      - SandwormCheck.ps1
+      - 'signatures/**'
+      - tools/run-latest.sh
+      - tools/run-latest.ps1
+
+permissions:
+  contents: write
+
+# Never cancel a release mid-flight; let it finish even if another push
+# lands before it completes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Cut release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Compute version tag
+        id: tag
+        run: |
+          git fetch --tags
+          BASE="v$(date -u '+%Y.%m.%d')"
+          N=1
+          TAG="$BASE"
+          while git tag --list | grep -qxF "$TAG"; do
+            TAG="${BASE}-${N}"
+            N=$((N + 1))
+          done
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Tag commit and create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --generate-notes \
+            --title "$TAG" \
+            sandwormcheck.sh \
+            SandwormCheck.ps1 \
+            tools/run-latest.sh \
+            tools/run-latest.ps1
